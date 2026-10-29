@@ -28,11 +28,15 @@ if (-not $tag) { throw 'the repo has no release tags yet' }
 git -C $app checkout --quiet "refs/tags/$tag"
 if ($LASTEXITCODE) { throw "checkout of $tag failed" }
 
+# npm prints warnings on stderr, which Windows PowerShell 5.1 turns into a
+# terminating error under 'Stop'; only the exit code counts here.
 Push-Location $app
+$ErrorActionPreference = 'Continue'
 try {
-  npm ci --omit=dev --no-audit --no-fund
+  cmd /c "npm ci --omit=dev --no-audit --no-fund 2>&1"
   if ($LASTEXITCODE) { throw 'npm ci failed' }
 } finally {
+  $ErrorActionPreference = 'Stop'
   Pop-Location
 }
 Write-Host "Installed $tag in $app"

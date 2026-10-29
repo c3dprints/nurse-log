@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1
+
+- Installer: npm warnings (such as the Node version notice on Node 18) no longer stop the install on Windows PowerShell 5.1.
+
 ## 0.1.0
 
 First version.
