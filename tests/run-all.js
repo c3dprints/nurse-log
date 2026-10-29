@@ -267,6 +267,15 @@ async function httpTests() {
       cookie = adminCookie;
     });
 
+    await test('http: each user keeps their own theme', async () => {
+      assert.strictEqual((await req('GET', '/api/state')).json.theme, 'system');
+      assert.strictEqual((await req('POST', '/api/account/theme', { theme: 'lavender' })).status, 200);
+      assert.strictEqual((await req('GET', '/api/state')).json.theme, 'lavender');
+      assert.strictEqual((await req('POST', '/api/account/theme', { theme: 'neon' })).status, 400);
+      const css = (await req('GET', '/style.css', null, { raw: true })).buf.toString();
+      for (const t of ['ocean', 'lavender', 'rose', 'sage', 'sunshine', 'night', 'midnight']) assert(css.includes(`[data-theme="${t}"]`), `style.css has ${t}`);
+    });
+
     await test('http: last admin cannot be demoted', async () => {
       const users = (await req('GET', '/api/users')).json;
       const me = users.find((u) => u.username === 'admin');

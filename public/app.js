@@ -250,6 +250,11 @@ function table(cols, rows, { onRow, empty = 'Nothing here yet.' } = {}) {
       cols.map((c) => h('td', { class: c.nowrap ? 'nowrap' : null }, c.get(r))))))));
 }
 
+// replaceChildren for page bodies: skips the null/false left by optional parts.
+function fill(el, ...kids) {
+  el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+}
+
 function errBox() { return h('div', { class: 'alert bad hidden', role: 'alert' }); }
 function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden'); }
 
@@ -258,8 +263,29 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '' };
 const $app = document.getElementById('app');
 
+// [key, name, kind, swatch colors: background, panel, accent]
+const THEMES = [
+  ['system', 'Match Windows', 'light or dark', ['#f4f6f8', '#12171c', '#0f766e']],
+  ['teal', 'Teal', 'light', ['#f4f6f8', '#ffffff', '#0f766e']],
+  ['ocean', 'Ocean', 'light', ['#f2f6fb', '#ffffff', '#1d5fbf']],
+  ['lavender', 'Lavender', 'light', ['#f6f4fb', '#ffffff', '#6d4bc4']],
+  ['rose', 'Rose', 'light', ['#fbf4f6', '#ffffff', '#b8336a']],
+  ['sage', 'Sage', 'light', ['#f3f7f2', '#ffffff', '#3a7535']],
+  ['sunshine', 'Sunshine', 'light', ['#fbf7ef', '#fffdf9', '#a65705']],
+  ['night', 'Night', 'dark', ['#12171c', '#1a2128', '#2dd4bf']],
+  ['midnight', 'Midnight', 'dark', ['#0f1420', '#161d2d', '#7aa7ff']],
+];
+
+// Teal is the base light palette in style.css; every other theme overrides it by name.
+function applyTheme(theme) {
+  const t = THEMES.some((x) => x[0] === theme) ? theme : 'system';
+  document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem('nl.theme', t); } catch { /* storage blocked */ }
+}
+
 async function loadState() {
   const st = await api('GET', '/api/state', null, { noReauth: true });
+  if (st.theme) applyTheme(st.theme);
   Object.assign(S, {
     user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady,
     idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version,
@@ -488,7 +514,7 @@ function renderShell() {
     main));
   const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, audit: viewAudit, settings: viewSettings };
   (views[r.name] || viewToday)(main, r).catch((e) => {
-    if (e.message !== 'signed out') main.replaceChildren(h('div', { class: 'alert bad' }, e.message));
+    if (e.message !== 'signed out') fill(main, h('div', { class: 'alert bad' }, e.message));
   });
 }
 
@@ -499,7 +525,7 @@ async function viewToday(main) {
   const due = t.meds.scheduled;
   const left = due.filter((d) => !d.record).length;
   const reload = () => viewToday(main);
-  main.replaceChildren(
+  fill(main, 
     h('div', { class: 'head' }, h('h1', {}, 'Today'), h('span', { class: 'muted', title: 'Nurse’s log, stardate…' }, `${new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })} · stardate ${stardate()}`),
       h('div', { class: 'grow' }), h('button', { class: 'btn primary', onclick: () => pickStudent((s) => visitForm(s, null, reload)) }, 'New visit')),
     h('div', { class: 'cards' },
@@ -565,7 +591,7 @@ async function viewStudents(main) {
   q.addEventListener('input', debounce(load, 200));
   grade.addEventListener('change', load);
   arch.addEventListener('change', load);
-  main.replaceChildren(
+  fill(main, 
     h('div', { class: 'head' }, h('h1', {}, 'Students'), h('div', { class: 'grow' }),
       exportMenu('students', params),
       h('button', { class: 'btn primary', onclick: () => studentForm(null) }, 'Add student')),
@@ -643,7 +669,7 @@ async function viewStudent(main, r) {
   const reload = () => viewStudent(main, { ...r, tab });
   const tabBtn = (key, label) => h('button', { class: 'tab' + (tab === key ? ' on' : ''), type: 'button', onclick: () => go(`#/student/${s.id}/${key}`) }, label);
   const body = h('div', {});
-  main.replaceChildren(
+  fill(main, 
     h('div', { class: 'head' },
       h('div', {}, h('h1', {}, `${s.first_name} ${s.last_name}`),
         h('div', { class: 'muted' }, [s.student_no && `ID ${s.student_no}`, s.grade && `Grade ${s.grade}`, s.homeroom, s.dob && `DOB ${s.dob} (${age(s.dob)})`].filter(Boolean).join(' \u00B7 '))),
@@ -854,7 +880,7 @@ async function logView(main, { title, kind, url, cols, onRow, days = 7 }) {
   from.addEventListener('change', load);
   to.addEventListener('change', load);
   q.addEventListener('input', debounce(load, 250));
-  main.replaceChildren(
+  fill(main, 
     h('div', { class: 'head' }, h('h1', {}, title), count, h('div', { class: 'grow' }), exportMenu(kind, params)),
     h('div', { class: 'panel' },
       h('div', { class: 'row', style: 'margin-bottom:12px' }, h('span', { class: 'muted' }, 'From'), from, h('span', { class: 'muted' }, 'to'), to, q),
@@ -874,18 +900,18 @@ const viewAudit = (main) => logView(main, { title: 'Audit log', kind: 'audit', u
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
   const body = h('div', {});
-  main.replaceChildren(
+  fill(main, 
     h('div', { class: 'head' }, h('h1', {}, 'Settings'), h('span', { class: 'muted' }, `Nurse’s Log v${S.version}`)),
     h('div', { class: 'panel' },
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, users: setUsers, school: setSchool, email: setEmail, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, users: setUsers, school: setSchool, email: setEmail, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -921,6 +947,23 @@ function setAccount(body) {
       err3, h('div', { class: 'row' }, rpw, h('button', { class: 'btn', onclick: async () => {
         try { const r = await post('/api/account/recovery', { password: rpw.value }); rpw.value = ''; showRecovery(r.recovery, () => {}, true); } catch (e) { showErr(err3, e.message); }
       } }, 'Make new code'))));
+}
+
+function setAppearance(body) {
+  const current = document.documentElement.getAttribute('data-theme') || 'system';
+  const cards = THEMES.map(([key, name, kind, [bg, panel, accent]]) => h('button', {
+    class: 'theme-card' + (key === current ? ' on' : ''), type: 'button', 'aria-pressed': String(key === current), 'data-key': key,
+    onclick: async () => {
+      applyTheme(key);
+      for (const c of cards) { const on = c.dataset.key === key; c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on)); }
+      try { await post('/api/account/theme', { theme: key }); toast(`Theme: ${name}`); } catch (e) { toast(e.message, true); }
+    },
+  },
+  h('div', { class: 'sw', style: `background:${bg}` }, h('i', { style: `background:${accent}` }), h('i', { style: `background:${panel};border:1px solid rgba(127,127,127,.25)` })),
+  h('div', { class: 'name' }, name, h('small', {}, kind))));
+  body.append(section('Theme',
+    h('p', { class: 'muted' }, 'Pick the colors for your account. Your choice follows you to any PC you sign in on.'),
+    h('div', { class: 'themes' }, cards)));
 }
 
 async function setUsers(body, _d, reload) {

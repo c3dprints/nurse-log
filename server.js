@@ -263,6 +263,7 @@ route('GET', '/api/state', { open: true }, ({ user }) => ({
   schoolName: db.setting('schoolName', ''), user: auth.publicUser(user),
   emailReady: mailer.configured(db.setting('smtp', {})), idleMinutes: db.setting('idleMinutes', 15),
   exportFolder: user ? db.setting('exportFolder', '') : '',
+  theme: user ? db.setting(`theme:${user.id}`, 'system') : null,
 }));
 
 route('POST', '/api/setup', { open: true }, ({ body, res }) => {
@@ -396,6 +397,14 @@ route('POST', '/api/account/password', { allowMustChange: true }, ({ body, user,
   auth.endSessionsFor(user.id, token);
   db.audit(user, 'password.change');
   return auth.publicUser(auth.user(user.id));
+});
+
+// Each user's own color theme (Settings > Appearance), kept with their account.
+const THEMES = ['system', 'teal', 'ocean', 'lavender', 'rose', 'sage', 'sunshine', 'night', 'midnight'];
+route('POST', '/api/account/theme', { allowMustChange: true }, ({ body, user }) => {
+  if (!THEMES.includes(body.theme)) throw fail(400, 'unknown theme');
+  db.setSetting(`theme:${user.id}`, body.theme);
+  return { theme: body.theme };
 });
 
 route('POST', '/api/account/recovery', { allowMustChange: true }, ({ body, user }) => {

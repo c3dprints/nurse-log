@@ -18,8 +18,30 @@
   --radius: 8px;
   color-scheme: light;
 }
+/* Themes: picked per user in Settings > Appearance and set as <html data-theme>.
+   "system" (or none) follows Windows light/dark; the light themes reuse the
+   status colors above, the dark ones set their own. */
+:root[data-theme="ocean"] { --bg: #f2f6fb; --panel: #ffffff; --panel-2: #f6f9fd; --line: #d8e2ee; --text: #182433; --muted: #5a6b80; --accent: #1d5fbf; --accent-2: #e5eefb; }
+:root[data-theme="lavender"] { --bg: #f6f4fb; --panel: #ffffff; --panel-2: #faf8fe; --line: #e2dcf0; --text: #251f33; --muted: #685f7e; --accent: #6d4bc4; --accent-2: #efe9fb; }
+:root[data-theme="rose"] { --bg: #fbf4f6; --panel: #ffffff; --panel-2: #fdf8f9; --line: #efdce2; --text: #33202a; --muted: #7a5e6c; --accent: #b8336a; --accent-2: #fbe8ef; }
+:root[data-theme="sage"] { --bg: #f3f7f2; --panel: #ffffff; --panel-2: #f8fbf7; --line: #d9e4d6; --text: #1f2a1e; --muted: #5b6b58; --accent: #3a7535; --accent-2: #e8f2e6; }
+:root[data-theme="sunshine"] { --bg: #fbf7ef; --panel: #fffdf9; --panel-2: #fdf9f1; --line: #ece2cf; --text: #2e261a; --muted: #72654c; --accent: #a65705; --accent-2: #fcefdc; }
+
+:root[data-theme="night"], :root[data-theme="midnight"] {
+  --danger: #ff7b72;
+  --danger-2: #3a1a19;
+  --warn: #e3b341;
+  --warn-2: #3a2f12;
+  --ok: #56d364;
+  --ok-2: #16301d;
+  --shadow: none;
+  color-scheme: dark;
+}
+:root[data-theme="night"] { --bg: #12171c; --panel: #1a2128; --panel-2: #20282f; --line: #2e3842; --text: #e6ebef; --muted: #97a3ae; --accent: #2dd4bf; --accent-2: #133a36; --on-accent: #062320; }
+:root[data-theme="midnight"] { --bg: #0f1420; --panel: #161d2d; --panel-2: #1c2437; --line: #2a3550; --text: #e4e9f2; --muted: #95a1b8; --accent: #7aa7ff; --accent-2: #1a2a4a; --on-accent: #0b1530; }
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]), :root[data-theme="system"] {
     --bg: #12171c;
     --panel: #1a2128;
     --panel-2: #20282f;
@@ -39,6 +61,18 @@
     color-scheme: dark;
   }
 }
+
+/* Theme picker cards in Settings > Appearance. */
+.themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.theme-card { border: 2px solid var(--line); border-radius: 10px; padding: 0; overflow: hidden; cursor: pointer; background: none; text-align: left; }
+.theme-card:hover { border-color: var(--accent); }
+.theme-card.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-2); }
+.theme-card .sw { display: flex; height: 64px; padding: 10px; gap: 8px; }
+.theme-card .sw i { display: block; border-radius: 5px; }
+.theme-card .sw i:nth-child(1) { width: 26%; }
+.theme-card .sw i:nth-child(2) { flex: 1; }
+.theme-card .name { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: var(--panel); border-top: 1px solid var(--line); font-weight: 600; }
+.theme-card .name small { font-weight: 400; color: var(--muted); }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }

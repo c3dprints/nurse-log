@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Themes: Settings > Appearance has Match Windows, six light color themes (Teal, Ocean, Lavender, Rose, Sage, Sunshine) and two dark ones (Night, Midnight). Each person picks their own and it follows their account.
+- Fixed the word "null" showing on Today and student pages when there was no low-stock warning or allergy banner.
+
 ## 1.0.1
 
 - New version numbering: 1.0.1 up to 1.0.100, then 1.1.0, and so on. `npm run bump` sets the next number; `npm run release` checks it.
