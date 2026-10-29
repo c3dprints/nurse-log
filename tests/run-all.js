@@ -136,6 +136,17 @@ async function unit() {
     assert.strictEqual(wb.getWorksheet('Visits').getCell('E3').value, 'Headache');
   });
 
+  await test('version rule: patch counts to 100, then the next minor', () => {
+    const { nextVersion } = require('../scripts/version');
+    assert.strictEqual(nextVersion(null), '1.0.1');
+    assert.strictEqual(nextVersion('v0.1.1'), '1.0.1');
+    assert.strictEqual(nextVersion('v1.0.1'), '1.0.2');
+    assert.strictEqual(nextVersion('v1.0.99'), '1.0.100');
+    assert.strictEqual(nextVersion('v1.0.100'), '1.1.0');
+    assert.strictEqual(nextVersion('v1.1.100'), '1.2.0');
+    assert(updater.compare('v1.0.100', 'v1.0.99') > 0, 'updater sees 1.0.100 as newer than 1.0.99');
+  });
+
   await test('updater version compare', () => {
     assert(updater.compare('v1.10.0', 'v1.9.9') > 0);
     assert.strictEqual(updater.latestTag(['v0.1.0', 'v0.10.0', 'v0.2.0', 'junk']), 'v0.10.0');

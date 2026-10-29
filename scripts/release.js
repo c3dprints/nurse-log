@@ -6,6 +6,8 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { nextVersion } = require('./version');
+const { latestTag } = require('../lib/updater');
 
 const ROOT = path.join(__dirname, '..');
 const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf8', ...opts }).trim();
@@ -13,6 +15,11 @@ const die = (msg) => { console.error('release stopped: ' + msg); process.exit(1)
 
 const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 const tag = `v${version}`;
+
+// Versions follow the rule in version.js (patch counts to 100, then the next minor).
+const latest = latestTag(run('git', ['tag', '-l', 'v*']).split('\n'));
+const want = nextVersion(latest);
+if (version !== want) die(`after ${latest || 'no release'} the next version is ${want}, package.json says ${version} (npm run bump sets it)`);
 
 const top = fs.readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8').match(/^## (\d+\.\d+\.\d+)/m);
 if (!top || top[1] !== version) die(`CHANGELOG.md top entry is ${top ? top[1] : 'missing'}, package.json says ${version}`);

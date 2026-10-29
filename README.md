@@ -27,10 +27,15 @@ After setup, an admin should:
 npm install
 npm start          # http://127.0.0.1:8940, data in %APPDATA%\NurseLog
 npm test           # runs on port 8941 against a temp folder
-npm run release    # bump package.json + CHANGELOG.md first; pushes main and the vX.Y.Z tag
+npm run bump       # sets the next version and adds a CHANGELOG.md entry to fill in
+npm run release    # tests, then pushes main and the vX.Y.Z tag
 ```
 
 Set `NL_DATA` to use another data folder and `NL_PORT` for another port.
+
+## Versions
+
+Releases count 1.0.1, 1.0.2 ... 1.0.100, then 1.1.0 ... 1.1.100, then 1.2.0, and so on: the last number goes up to 100 before the middle one moves. `npm run bump` picks the next number and `npm run release` refuses any other.
 
 ## Updates
 

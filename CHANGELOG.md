@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- New version numbering: 1.0.1 up to 1.0.100, then 1.1.0, and so on. `npm run bump` sets the next number; `npm run release` checks it.
+
 ## 0.1.1
 
 - Installer: npm warnings (such as the Node version notice on Node 18) no longer stop the install on Windows PowerShell 5.1.
