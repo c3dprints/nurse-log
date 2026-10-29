@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+
+- Remote access with Tailscale: Settings > Remote access shows this PC's Tailscale IP and name and the links to open on a phone. Off until an admin turns it on; it then listens only on the Tailscale address (never the school network) and only answers Tailscale devices. Remote sign-ins are audited with the device address. Save as and Browse are hidden on a phone (Download works instead).
+- Phone layout: bigger buttons, no zooming into fields on iPhone, two-column cards, stacked details.
+
 ## 1.0.2
 
 - Themes: Settings > Appearance has Match Windows, six light color themes (Teal, Ocean, Lavender, Rose, Sage, Sunshine) and two dark ones (Night, Midnight). Each person picks their own and it follows their account.

@@ -156,14 +156,15 @@ async function unit() {
 // ---- http -------------------------------------------------------------------------
 
 const PORT = 8941;
+const TS_IP = '127.0.0.2'; // stands in for this PC's Tailscale address
 let cookie = '';
-function req(method, url, body, { headers = {}, raw = false } = {}) {
+function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1' } = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const r = http.request({
-      host: '127.0.0.1', port: PORT, path: url, method,
+      host: ip, port: PORT, path: url, method,
       headers: {
-        Host: `127.0.0.1:${PORT}`,
+        Host: `${ip}:${PORT}`,
         ...(method === 'POST' ? { 'Content-Type': 'application/json', 'X-Nurse-Log': '1' } : {}),
         ...(cookie ? { Cookie: cookie } : {}),
         ...headers,
@@ -191,7 +192,7 @@ async function httpTests() {
   const exportDir = path.join(tmp, 'exports');
   fs.mkdirSync(exportDir);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1' },
+    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP },
     stdio: 'ignore', windowsHide: true,
   });
   try {
@@ -302,6 +303,34 @@ async function httpTests() {
       assert.strictEqual((await req('POST', '/api/login', { username: 'admin', password: 'New password 77' })).status, 200);
       const acts = (await req('GET', '/api/audit?q=password')).json.map((a) => a.action);
       assert(acts.includes('password.reset') && acts.includes('password.reset-failed'), acts.join());
+    });
+
+    await test('http: remote access over Tailscale is off until an admin turns it on', async () => {
+      let r = (await req('GET', '/api/remote')).json;
+      assert.strictEqual(r.enabled, false);
+      assert.deepStrictEqual(r.ips, [TS_IP]);
+      assert.deepStrictEqual(r.listening, []);
+      await assert.rejects(req('GET', '/api/ping', null, { ip: TS_IP }), 'nothing listens on the Tailscale address yet');
+      assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: true })).status, 200);
+      r = (await req('GET', '/api/remote')).json;
+      assert.deepStrictEqual(r.listening, [TS_IP]);
+      assert.deepStrictEqual(r.urls, [`http://${TS_IP}:${PORT}`]);
+      assert.strictEqual((await req('GET', '/api/state', null, { ip: TS_IP })).json.remote, true);
+      assert.strictEqual((await req('GET', '/api/state')).json.remote, false);
+      assert.strictEqual((await req('GET', '/api/ping', null, { ip: TS_IP, headers: { Host: `evil.com:${PORT}` } })).status, 403);
+      assert.match((await req('POST', '/api/export', { kind: 'visits', target: 'saveas' }, { ip: TS_IP })).json.error, /office PC/);
+      const d = await req('POST', '/api/export', { kind: 'visits', target: 'download' }, { ip: TS_IP, raw: true });
+      assert.strictEqual(d.buf.slice(0, 2).toString(), 'PK', 'download works from a phone');
+      const saved = cookie;
+      cookie = '';
+      assert.strictEqual((await req('POST', '/api/login', { username: 'admin', password: 'New password 77' }, { ip: TS_IP })).status, 200);
+      cookie = saved;
+      const login = (await req('GET', '/api/audit?q=Tailscale')).json.find((a) => a.action === 'login');
+      assert(login && /Tailscale 127.0.0.1/.test(login.details), 'remote sign-in is audited with the address');
+      assert.match((await req('POST', '/api/settings', { remoteAccess: false }, { ip: TS_IP })).json.error, /office PC/);
+      assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: false })).status, 200);
+      assert.deepStrictEqual((await req('GET', '/api/remote')).json.listening, []);
+      await assert.rejects(req('GET', '/api/ping', null, { ip: TS_IP }), 'listener closed when turned off');
     });
 
     await test('http: static files', async () => {

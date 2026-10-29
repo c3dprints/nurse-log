@@ -21,6 +21,14 @@ After setup, an admin should:
 3. **Settings > Users**: add the other nurses. They pick their own password at first sign-in.
 4. Turn on **BitLocker** for the PC's drive so records are encrypted if the PC is lost.
 
+## Use it from a phone (Tailscale)
+
+Install Tailscale on the PC and the phone (same account), then turn on **Settings > Remote access**. It shows the PC's Tailscale IP and the address to open on the phone (http://<tailscale-ip>:8940). The app then also listens on the Tailscale address only, never the school network, and only answers Tailscale devices. If the phone cannot connect, allow the port once in an admin PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "Nurse's Log over Tailscale" -Direction Inbound -Protocol TCP -LocalPort 8940 -RemoteAddress 100.64.0.0/10 -Action Allow
+```
+
 ## Develop
 
 ```

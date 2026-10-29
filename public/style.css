@@ -200,9 +200,19 @@ tr.click:hover td { background: var(--panel-2); }
 .linkbtn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; text-decoration: underline; }
 
 @media (max-width: 760px) {
-  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-  .side { flex-direction: row; overflow-x: auto; padding: 6px; }
+  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: 100dvh; }
+  .side { flex-direction: row; overflow-x: auto; padding: 6px; border-right: 0; border-bottom: 1px solid var(--line); }
   .brand, .who, .side .grow { display: none; }
-  .nav { width: auto; }
-  .main { padding: 16px; }
+  .nav { width: auto; white-space: nowrap; }
+  .main { padding: 14px 12px 40px; }
+  .btn { padding: 8px 12px; }
+  .search { max-width: none; }
+  .modal { padding: 16px; }
+  .overlay { padding: 12px 8px; }
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  input, select, textarea { font-size: 16px; } /* stops iPhone zooming into fields */
+}
+@media (max-width: 500px) {
+  .kv { grid-template-columns: 1fr; gap: 0 0; }
+  .kv dd { margin-bottom: 8px; }
 }

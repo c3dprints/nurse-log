@@ -182,11 +182,12 @@ function dropMenu(label, items, cls = '') {
 
 // Excel export with the three ways to save. params() gives the filters at click time.
 function exportMenu(kind, params = () => ({})) {
+  // On a phone (S.remote) the Save As dialog would open on the office PC, so it is left out.
   return dropMenu('Export to Excel', () => [
-    ['Save as\u2026', 'pick where to save it', () => doExport(kind, params(), 'saveas')],
+    S.remote ? null : ['Save as\u2026', 'pick where to save it', () => doExport(kind, params(), 'saveas')],
     ['Save to folder', S.exportFolder || 'an admin sets the folder in Settings', () => doExport(kind, params(), 'folder')],
-    ['Download', 'to this PC\u2019s Downloads folder', () => doExport(kind, params(), 'download')],
-  ]);
+    ['Download', S.remote ? 'to this device' : 'to this PC\u2019s Downloads folder', () => doExport(kind, params(), 'download')],
+  ].filter(Boolean));
 }
 
 async function doExport(kind, params, target) {
@@ -260,7 +261,7 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 
 // ---- app state and routing ------------------------------------------------------
 
-const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '' };
+const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false };
 const $app = document.getElementById('app');
 
 // [key, name, kind, swatch colors: background, panel, accent]
@@ -288,7 +289,7 @@ async function loadState() {
   if (st.theme) applyTheme(st.theme);
   Object.assign(S, {
     user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady,
-    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version,
+    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote,
   });
 }
 
@@ -900,7 +901,7 @@ const viewAudit = (main) => logView(main, { title: 'Audit log', kind: 'audit', u
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -911,7 +912,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, users: setUsers, school: setSchool, email: setEmail, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -947,6 +948,60 @@ function setAccount(body) {
       err3, h('div', { class: 'row' }, rpw, h('button', { class: 'btn', onclick: async () => {
         try { const r = await post('/api/account/recovery', { password: rpw.value }); rpw.value = ''; showRecovery(r.recovery, () => {}, true); } catch (e) { showErr(err3, e.message); }
       } }, 'Make new code'))));
+}
+
+const FIREWALL_CMD = 'New-NetFirewallRule -DisplayName "Nurse\'s Log over Tailscale" -Direction Inbound -Protocol TCP -LocalPort 8940 -RemoteAddress 100.64.0.0/10 -Action Allow';
+
+function copyable(text) {
+  const box = h('input', { type: 'text', value: text, readonly: true, style: 'font-family:Consolas,monospace' });
+  return h('div', { class: 'row', style: 'flex-wrap:nowrap' }, box, h('button', { class: 'btn', type: 'button', onclick: async () => {
+    box.select();
+    try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { document.execCommand('copy'); toast('Copied'); }
+  } }, 'Copy'));
+}
+
+async function setRemote(body, _d, reload) {
+  const r = await get('/api/remote');
+  const admin = S.user.role === 'admin';
+  const connected = r.ips.length > 0;
+  const on = r.enabled && r.listening.length > 0;
+  const status = !r.installed ? h('div', { class: 'alert warn' }, 'Tailscale is not installed on this PC. Install it from tailscale.com and sign in.')
+    : !connected ? h('div', { class: 'alert warn' }, `Tailscale is not connected on this PC (${r.state}). Open Tailscale and sign in.`)
+      : r.error ? h('div', { class: 'alert bad' }, r.error)
+        : on ? h('div', { class: 'alert ok' }, 'Remote access is on. Devices signed in to your Tailscale can open Nurse’s Log.')
+          : h('div', { class: 'alert warn' }, 'Remote access is off. Only this PC can open Nurse’s Log.');
+
+  const toggle = h('input', { type: 'checkbox', checked: r.enabled });
+  toggle.addEventListener('change', async () => {
+    try {
+      await post('/api/settings', { remoteAccess: toggle.checked });
+      toast(toggle.checked ? 'Remote access on' : 'Remote access off');
+      reload();
+    } catch (e) { toggle.checked = !toggle.checked; toast(e.message, true); }
+  });
+
+  fill(body,
+    section('Remote access with Tailscale', status,
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'Tailscale IP'), h('dd', {}, connected ? h('b', {}, r.ips.join(', ')) : '—'),
+        h('dt', {}, 'Tailscale name'), h('dd', {}, r.dnsName || '—'),
+        h('dt', {}, 'Port'), h('dd', {}, String(r.port)),
+        h('dt', {}, 'This device'), h('dd', {}, S.remote ? 'connected remotely over Tailscale' : 'the office PC')),
+      admin ? h('label', { class: 'check', style: 'margin-top:16px' }, toggle, 'Let phones and other devices on my Tailscale open Nurse’s Log')
+        : h('p', { class: 'muted small' }, 'An admin turns remote access on or off.'),
+      h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn', onclick: reload }, 'Refresh'))),
+    on ? section('Open on your phone', h('p', { class: 'muted' }, 'Type one of these into the phone’s browser, then use "Add to Home Screen" so it opens like an app.'),
+      h('div', { style: 'display:grid;gap:8px' }, r.urls.map(copyable))) : null,
+    section('Set up a phone',
+      h('ol', { style: 'margin:0;padding-left:20px;line-height:1.8' },
+        h('li', {}, 'Install Tailscale on this PC and on the phone, and sign both in to the same Tailscale account.'),
+        h('li', {}, 'Turn on remote access above (admin).'),
+        h('li', {}, 'On the phone, open the address shown above and sign in with your Nurse’s Log username and password.')),
+      h('p', { class: 'muted small' }, 'The connection is encrypted by Tailscale and only devices on your Tailscale can reach it; the school Wi-Fi cannot. The same password, lockout and auto sign-out apply, and every remote sign-in is in the audit log with the device’s address. "Save as" is not available from a phone; use Download.')),
+    admin && on ? section('If the phone cannot connect',
+      h('p', { class: 'muted' }, 'Windows Firewall may block it. Allow it once by running this in PowerShell as administrator (it only lets Tailscale devices in, on this one port):'),
+      copyable(FIREWALL_CMD)) : null,
+  );
 }
 
 function setAppearance(body) {
@@ -1063,7 +1118,7 @@ function setSaving(body, d, reload) {
   body.append(
     section('"Save to folder" location', h('p', { class: 'muted' }, 'Exports and backups saved with "Save to folder" go here without asking. A shared network folder works.'),
       err, h('div', { class: 'row' }, h('div', { style: 'flex:1;min-width:240px' }, folder),
-        h('button', { class: 'btn', onclick: async () => {
+        S.remote ? null : h('button', { class: 'btn', onclick: async () => {
           try { const r = await post('/api/settings/pick-folder'); if (r.folder) folder.value = r.folder; } catch (e) { showErr(err, e.message); }
         } }, 'Browse\u2026'),
         h('button', { class: 'btn primary', onclick: async () => {
@@ -1072,7 +1127,7 @@ function setSaving(body, d, reload) {
     section('Export all records', h('p', { class: 'muted' }, 'One Excel workbook with every student, medication, dose and visit.'), exportMenu('all')),
     section('Backup', h('p', { class: 'muted' }, `A copy is kept automatically each day (last 30 days) in ${d.settings.dataDir}\\backups. Keep one somewhere else too, such as the school network or a USB drive.`),
       h('div', { class: 'row' },
-        h('button', { class: 'btn', onclick: () => backup('saveas') }, 'Save backup as\u2026'),
+        S.remote ? null : h('button', { class: 'btn', onclick: () => backup('saveas') }, 'Save backup as\u2026'),
         h('button', { class: 'btn', onclick: () => backup('folder') }, 'Save backup to folder'))));
 }
 

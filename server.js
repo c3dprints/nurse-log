@@ -17,6 +17,7 @@ const excel = require('./lib/excel');
 const mailer = require('./lib/mailer');
 const dialogs = require('./lib/dialogs');
 const updater = require('./lib/updater');
+const tailscale = require('./lib/tailscale');
 const pkg = require('./package.json');
 
 const APP = 'nurse-log';
@@ -88,6 +89,63 @@ function restart() {
   setTimeout(() => process.exit(0), 300);
 }
 
+// ---- remote access over Tailscale -------------------------------------------------
+
+// While Settings > Remote access is on, a second listener sits on each of this
+// PC's Tailscale addresses (never 0.0.0.0, so the school network cannot reach
+// it). Checked every minute so it follows Tailscale connecting or dropping.
+const remote = { listeners: new Map(), dnsName: null, state: 'Unknown', installed: true, error: null, checkedAt: null };
+
+async function syncRemote() {
+  const enabled = !!db.setting('remoteAccess', false);
+  const st = await tailscale.status();
+  Object.assign(remote, { dnsName: st.dnsName, state: st.state, installed: st.installed, checkedAt: Date.now() });
+  const want = new Set(enabled ? tailscale.ips() : []);
+  for (const [ip, srv] of remote.listeners) {
+    if (!want.has(ip)) {
+      srv.close();
+      remote.listeners.delete(ip);
+      log(`remote access: stopped listening on ${ip}`);
+    }
+  }
+  for (const ip of want) {
+    if (remote.listeners.has(ip)) continue;
+    const srv = http.createServer(onRequest);
+    remote.listeners.set(ip, srv);
+    await new Promise((resolve) => {
+      srv.on('error', (e) => { // also covers errors after it started, so they never crash the app
+        remote.listeners.delete(ip);
+        remote.error = `could not listen on ${ip}: ${e.message}`;
+        log(`remote access: ${remote.error}`);
+        resolve();
+      });
+      srv.listen(PORT, ip, () => {
+        remote.error = null;
+        log(`remote access: listening on http://${ip}:${PORT}`);
+        resolve();
+      });
+    });
+  }
+  if (!enabled) remote.error = null;
+}
+
+function remoteInfo() {
+  const ips = [...remote.listeners.keys()];
+  const found = tailscale.ips();
+  return {
+    enabled: !!db.setting('remoteAccess', false),
+    state: remote.state,
+    installed: remote.installed,
+    ips: found,
+    dnsName: remote.dnsName,
+    listening: ips,
+    port: PORT,
+    urls: [...(remote.dnsName && ips.length ? [`http://${remote.dnsName}:${PORT}`] : []), ...ips.map((ip) => `http://${ip}:${PORT}`)],
+    error: remote.error,
+    checkedAt: remote.checkedAt,
+  };
+}
+
 // ---- exports -------------------------------------------------------------------
 
 function fileStamp() {
@@ -154,10 +212,12 @@ async function buildExport(user, body) {
 
 // Writes buf where the nurse asked: a Save As dialog, the default save folder,
 // or back to the app window as a download. Every export is audited.
-async function deliver(user, { buf, name, studentId }, target, what) {
+async function deliver(user, { buf, name, studentId }, target, what, fromRemote = false) {
   const folder = db.setting('exportFolder', '') || '';
   let file = null;
   if (target === 'saveas') {
+    // The dialog would open on the office PC, not on the phone asking for it.
+    if (fromRemote) throw fail(400, 'Save as only works on the office PC; use Download on a phone');
     if (NO_DIALOGS) throw fail(400, 'dialogs are off');
     const filter = name.endsWith('.xlsx') ? 'Excel workbook (*.xlsx)|*.xlsx' : 'Nurse’s Log backup (*.sqlite)|*.sqlite';
     file = await dialogs.saveAs({ defaultName: name, folder, filter });
@@ -176,18 +236,36 @@ async function deliver(user, { buf, name, studentId }, target, what) {
 
 // ---- http ----------------------------------------------------------------------
 
-const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
-const ALLOWED_ORIGINS = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
+// Host names the app answers to: this PC, plus its Tailscale address and
+// MagicDNS name while remote access is on.
+function allowedHosts() {
+  const names = ['127.0.0.1', 'localhost'];
+  if (remote.listeners.size) {
+    names.push(...remote.listeners.keys());
+    if (remote.dnsName) names.push(remote.dnsName, remote.dnsName.split('.')[0]);
+  }
+  return new Set(names.map((n) => `${n.toLowerCase()}:${PORT}`));
+}
+
+// A request that came in on a Tailscale listener rather than 127.0.0.1.
+const isRemote = (req) => String(req.socket.localAddress || '').replace(/^::ffff:/, '') !== HOST;
 
 // Any web page can fire requests at localhost. The Host check stops DNS
 // rebinding; Sec-Fetch-Site and Origin keep other sites off the API; the custom
-// header on POST forces a CORS preflight we never answer.
+// header on POST forces a CORS preflight we never answer. Remote requests must
+// also come from a Tailscale address while remote access is switched on.
 function guard(req) {
-  if (!ALLOWED_HOSTS.has(req.headers.host)) return 'bad host';
+  const hosts = allowedHosts();
+  if (!hosts.has(String(req.headers.host || '').toLowerCase())) return 'bad host';
+  if (isRemote(req)) {
+    if (!db.setting('remoteAccess', false)) return 'remote access is off';
+    const peer = req.socket.remoteAddress;
+    if (!tailscale.inTailnet(peer) && !tailscale.isLoopback(peer)) return 'not a Tailscale device';
+  }
   const site = req.headers['sec-fetch-site'];
   if (req.url.startsWith('/api/') && site && site !== 'same-origin' && site !== 'none') return 'cross-site request';
   const o = req.headers.origin;
-  if (o && !ALLOWED_ORIGINS.has(o)) return 'bad origin';
+  if (o && !hosts.has(o.replace(/^http:\/\//, '').toLowerCase())) return 'bad origin';
   if (req.method === 'POST' && req.headers['x-nurse-log'] !== '1') return 'missing header';
   return null;
 }
@@ -258,13 +336,17 @@ function route(method, pattern, opts, fn) {
 
 route('GET', '/api/ping', { open: true }, () => ({ app: APP, version: pkg.version }));
 
-route('GET', '/api/state', { open: true }, ({ user }) => ({
+route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   app: APP, version: pkg.version, needsSetup: auth.needsSetup(),
   schoolName: db.setting('schoolName', ''), user: auth.publicUser(user),
   emailReady: mailer.configured(db.setting('smtp', {})), idleMinutes: db.setting('idleMinutes', 15),
   exportFolder: user ? db.setting('exportFolder', '') : '',
   theme: user ? db.setting(`theme:${user.id}`, 'system') : null,
+  remote: isRemote(req),
 }));
+
+// Where to open the app from a phone. Any signed-in user can see it; only an admin can switch it on.
+route('GET', '/api/remote', () => remoteInfo());
 
 route('POST', '/api/setup', { open: true }, ({ body, res }) => {
   if (!auth.needsSetup()) throw fail(400, 'setup is already done');
@@ -281,13 +363,14 @@ route('POST', '/api/setup', { open: true }, ({ body, res }) => {
   return { user: auth.publicUser(made.user), recovery: made.recovery };
 });
 
-route('POST', '/api/login', { open: true }, ({ body, res }) => {
+route('POST', '/api/login', { open: true }, ({ body, res, req }) => {
   const r = auth.login(body.username, body.password);
+  const from = isRemote(req) ? { from: `Tailscale ${String(req.socket.remoteAddress).replace(/^::ffff:/, '')}` } : null;
   if (r.error) {
-    if (r.user) db.audit(r.user, 'login.failed', { details: r.error });
+    if (r.user) db.audit(r.user, 'login.failed', { details: { error: r.error, ...from } });
     throw fail(401, r.error);
   }
-  db.audit(r.user, 'login');
+  db.audit(r.user, 'login', { details: from });
   res.extraHeaders = setCookie(r.token);
   return { user: auth.publicUser(r.user) };
 });
@@ -361,18 +444,18 @@ route('GET', '/api/visits', ({ query }) => records.visitLog({ ...rangeOf(query),
 route('GET', '/api/given', ({ query }) => records.givenLog({ ...rangeOf(query), limit: 2000 }));
 route('GET', '/api/audit', { admin: true }, ({ query }) => records.auditLog({ ...rangeOf(query), limit: 2000 }));
 
-route('POST', '/api/export', async ({ body, user, res }) => {
+route('POST', '/api/export', async ({ body, user, res, req }) => {
   const out = await buildExport(user, body);
-  const r = await deliver(user, out, body.target || 'download', body.kind);
+  const r = await deliver(user, out, body.target || 'download', body.kind, isRemote(req));
   if (r.download) res.fileDownload = out;
   return r;
 });
 
-route('POST', '/api/backup', { admin: true }, async ({ body, user }) => {
+route('POST', '/api/backup', { admin: true }, async ({ body, user, req }) => {
   db.save();
   const buf = fs.readFileSync(db.file);
   const target = body.target === 'folder' ? 'folder' : 'saveas';
-  return deliver(user, { buf, name: `Nurse-Log-backup_${fileStamp()}.sqlite`, studentId: null }, target, 'backup');
+  return deliver(user, { buf, name: `Nurse-Log-backup_${fileStamp()}.sqlite`, studentId: null }, target, 'backup', isRemote(req));
 });
 
 // ---- account ----
@@ -465,7 +548,7 @@ route('POST', '/api/users/:id/password', { admin: true }, ({ params, body, user 
 
 route('GET', '/api/settings', { admin: true }, () => ({ settings: settingsPublic(), update: { ...updateState, busy: updateBusy } }));
 
-route('POST', '/api/settings', { admin: true }, ({ body, user }) => {
+route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
   const changed = {};
   if ('schoolName' in body) { db.setSetting('schoolName', String(body.schoolName || '').trim().slice(0, 120)); changed.schoolName = true; }
   if ('idleMinutes' in body) {
@@ -481,6 +564,12 @@ route('POST', '/api/settings', { admin: true }, ({ body, user }) => {
     changed.exportFolder = f;
   }
   if ('autoUpdate' in body) { db.setSetting('autoUpdate', !!body.autoUpdate); changed.autoUpdate = !!body.autoUpdate; }
+  if ('remoteAccess' in body) {
+    // Switching it off from a phone would cut that phone off mid-request; do it at the office PC.
+    if (!body.remoteAccess && isRemote(req)) throw fail(400, 'turn remote access off from the office PC');
+    db.setSetting('remoteAccess', !!body.remoteAccess);
+    changed.remoteAccess = !!body.remoteAccess;
+  }
   if (body.smtp) {
     const old = db.setting('smtp', {}) || {};
     const s = body.smtp;
@@ -495,6 +584,7 @@ route('POST', '/api/settings', { admin: true }, ({ body, user }) => {
     changed.smtp = { host: next.host, port: next.port, user: next.user, from: next.from, passChanged: !!s.pass || !!s.clearPass };
   }
   db.audit(user, 'settings.update', { details: changed });
+  if ('remoteAccess' in changed) await syncRemote();
   return settingsPublic();
 });
 
@@ -508,7 +598,8 @@ route('POST', '/api/settings/test-email', { admin: true }, async ({ user }) => {
   return { sentTo: user.email };
 });
 
-route('POST', '/api/settings/pick-folder', { admin: true }, async () => {
+route('POST', '/api/settings/pick-folder', { admin: true }, async ({ req }) => {
+  if (isRemote(req)) throw fail(400, 'Browse only works on the office PC; type the folder path instead');
   if (NO_DIALOGS) throw fail(400, 'dialogs are off');
   return { folder: await dialogs.pickFolder({ folder: db.setting('exportFolder', ''), title: 'Default folder for "Save to folder"' }) };
 });
@@ -553,7 +644,7 @@ async function handle(req, res) {
       if (r.admin && user.role !== 'admin') throw fail(403, 'admins only');
     }
     const body = req.method === 'POST' ? await readBody(req) : {};
-    const out = await r.fn({ body, query: Object.fromEntries(url.searchParams), params, user, token, res });
+    const out = await r.fn({ body, query: Object.fromEntries(url.searchParams), params, user, token, res, req });
     if (res.fileDownload) {
       const { buf, name } = res.fileDownload;
       return send(res, 200, buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', {
@@ -568,12 +659,14 @@ async function handle(req, res) {
   }
 }
 
-const server = http.createServer((req, res) => {
+function onRequest(req, res) {
   handle(req, res).catch((e) => {
     log(`unhandled: ${e.stack || e.message}`);
     if (!res.headersSent) send(res, 500, { error: 'server error' });
   });
-});
+}
+
+const server = http.createServer(onRequest);
 
 server.once('listening', () => log(`v${pkg.version} listening on http://${HOST}:${PORT}, data in ${DATA_DIR}`));
 
@@ -590,6 +683,9 @@ server.on('error', (e) => {
   auth = new Auth(db);
   records = new Records(db);
   server.listen(PORT, HOST);
+  const syncSafe = () => syncRemote().catch((e) => log(`remote access: ${e.message}`));
+  server.once('listening', syncSafe); // after the main port is ours, so an old copy still shutting down is not raced
+  setInterval(syncSafe, 60 * 1000).unref();
   if (process.env.NL_NO_UPDATE_CHECK !== '1') {
     setTimeout(() => checkForUpdate().catch(() => {}), 15000);
     setInterval(() => checkForUpdate().catch(() => {}), 6 * 60 * 60 * 1000).unref();
