@@ -31,6 +31,9 @@ const HOST = '127.0.0.1';
 const DATA_DIR = process.env.NL_DATA || path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'NurseLog');
 const PUBLIC = path.join(APP_DIR, 'public');
 const MAX_BODY = 2 * 1024 * 1024;
+// How long the audit log keeps entries (Settings > Audit log); 0 keeps everything.
+const AUDIT_DAYS = 14;
+const AUDIT_CHOICES = [14, 30, 90, 365, 0];
 const MAX_AUDIO_BODY = 16 * 1024 * 1024; // a few minutes of dictation, base64
 const COOKIE = 'nl_session';
 const NO_DIALOGS = process.env.NL_NO_DIALOGS === '1'; // tests
@@ -372,6 +375,7 @@ function settingsPublic() {
   return {
     schoolName: db.setting('schoolName', ''),
     idleMinutes: db.setting('idleMinutes', 15),
+    auditDays: db.setting('auditDays', AUDIT_DAYS),
     pinSignIn: db.setting('pinSignIn', true) !== false,
     exportFolder: db.setting('exportFolder', ''),
     autoUpdate: db.setting('autoUpdate', false),
@@ -617,12 +621,76 @@ route('POST', '/api/reset/finish', { open: true }, ({ body, req }) => {
 route('GET', '/api/today', () => records.today());
 route('GET', '/api/meds-due', ({ query }) => records.medsDue(/^\d{4}-\d\d-\d\d$/.test(query.day || '') ? query.day : null));
 
-route('GET', '/api/students', ({ query }) => ({
-  students: records.searchStudents({ q: query.q || '', grade: query.grade || '', archived: query.archived === '1' }),
-  grades: records.grades(),
-}));
+route('GET', '/api/students', ({ query }) => {
+  const at = new Map(db.all("SELECT owner_id, updated_at FROM photos WHERE kind = 'student'").map((p) => [p.owner_id, p.updated_at]));
+  return {
+    students: records.searchStudents({ q: query.q || '', grade: query.grade || '', archived: query.archived === '1' }).map((s) => ({ ...s, photo_at: at.get(s.id) || null })),
+    grades: records.grades(),
+  };
+});
 route('POST', '/api/students', ({ body, user }) => records.createStudent(user, body));
-route('GET', '/api/students/:id', ({ params, user }) => records.board(user, params.id));
+route('GET', '/api/students/:id', ({ params, user }) => {
+  const b = records.board(user, params.id);
+  b.student.photo_at = photoAt('student', params.id);
+  return b;
+});
+
+// ---- photos ----------------------------------------------------------------------
+// A student's photo and each user's own profile photo: small square JPEGs the page
+// makes from the picked picture, kept in the database so backups carry them. Shown
+// only to signed-in users and never cached by the browser.
+const PHOTO_MAX = 400 * 1024;
+
+function photoAt(kind, id) {
+  const p = db.get('SELECT updated_at FROM photos WHERE kind = ? AND owner_id = ?', [kind, id]);
+  return p ? p.updated_at : null;
+}
+
+function readJpeg(body) {
+  const m = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(body.data || ''));
+  if (!m) throw fail(400, 'send the photo as a JPEG picture');
+  const buf = Buffer.from(m[1], 'base64');
+  if (buf.length > PHOTO_MAX) throw fail(400, 'that photo is too big');
+  if (buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) throw fail(400, 'that file is not a JPEG picture');
+  return buf;
+}
+
+function savePhoto(kind, id, buf) {
+  db.run('INSERT INTO photos(kind, owner_id, jpeg, updated_at) VALUES(?,?,?,?) ON CONFLICT(kind, owner_id) DO UPDATE SET jpeg = excluded.jpeg, updated_at = excluded.updated_at',
+    [kind, id, new Uint8Array(buf), Date.now()]);
+  return { photoAt: photoAt(kind, id) };
+}
+
+function sendPhoto(kind, id, res) {
+  const p = db.get('SELECT jpeg FROM photos WHERE kind = ? AND owner_id = ?', [kind, id]);
+  if (!p) throw fail(404, 'no photo');
+  res.image = Buffer.from(p.jpeg);
+}
+
+route('GET', '/api/photos/student/:id', ({ params, res }) => sendPhoto('student', params.id, res));
+route('GET', '/api/photos/user/:id', ({ params, res }) => sendPhoto('user', params.id, res));
+route('POST', '/api/students/:id/photo', { maxBody: 1024 * 1024 }, ({ params, body, user }) => {
+  records.student(params.id);
+  const r = savePhoto('student', params.id, readJpeg(body));
+  db.audit(user, 'student.photo', { entity: 'student', entityId: params.id, studentId: params.id, details: 'photo added or changed' });
+  return r;
+});
+route('POST', '/api/students/:id/photo/remove', ({ params, user }) => {
+  records.student(params.id);
+  db.run("DELETE FROM photos WHERE kind = 'student' AND owner_id = ?", [params.id]);
+  db.audit(user, 'student.photo-removed', { entity: 'student', entityId: params.id, studentId: params.id });
+  return { photoAt: null };
+});
+route('POST', '/api/account/photo', { maxBody: 1024 * 1024 }, ({ body, user }) => {
+  const r = savePhoto('user', user.id, readJpeg(body));
+  db.audit(user, 'account.photo', { entity: 'user', entityId: user.id });
+  return r;
+});
+route('POST', '/api/account/photo/remove', ({ user }) => {
+  db.run("DELETE FROM photos WHERE kind = 'user' AND owner_id = ?", [user.id]);
+  db.audit(user, 'account.photo-removed', { entity: 'user', entityId: user.id });
+  return { photoAt: null };
+});
 route('POST', '/api/students/:id', ({ params, body, user }) => records.updateStudent(user, params.id, body));
 route('POST', '/api/students/:id/archive', ({ params, body, user }) => records.setArchived(user, params.id, !!body.archived));
 route('POST', '/api/students/:id/meds', ({ params, body, user }) => records.createMedication(user, params.id, body));
@@ -768,6 +836,13 @@ route('GET', '/api/settings', { admin: true }, () => ({ settings: settingsPublic
 route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
   const changed = {};
   if ('schoolName' in body) { db.setSetting('schoolName', String(body.schoolName || '').trim().slice(0, 120)); changed.schoolName = true; }
+  if ('auditDays' in body) {
+    const n = Math.round(Number(body.auditDays));
+    if (!AUDIT_CHOICES.includes(n)) throw fail(400, 'pick how long to keep the audit log');
+    db.setSetting('auditDays', n);
+    changed.auditDays = n;
+    db.pruneAudit(n);
+  }
   if ('idleMinutes' in body) {
     const n = Math.round(Number(body.idleMinutes));
     if (!(n >= 1 && n <= 240)) throw fail(400, 'auto sign-out must be 1 to 240 minutes');
@@ -958,6 +1033,7 @@ async function handle(req, res) {
     }
     const body = req.method === 'POST' ? await readBody(req, r.maxBody) : {};
     const out = await r.fn({ body, query: Object.fromEntries(url.searchParams), params, user, token, res, req });
+    if (res.image) return send(res, 200, res.image, 'image/jpeg', { 'Cache-Control': 'private, no-store' });
     if (res.fileDownload) {
       const { buf, name } = res.fileDownload;
       return send(res, 200, buf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', {
@@ -1004,6 +1080,9 @@ server.on('error', (e) => {
     setInterval(() => checkForUpdate().catch(() => {}), 6 * 60 * 60 * 1000).unref();
   }
   setInterval(() => { try { db.backup(); } catch (e) { log(`backup failed: ${e.message}`); } }, 60 * 60 * 1000).unref();
+  const prune = () => { try { db.pruneAudit(db.setting('auditDays', AUDIT_DAYS)); } catch (e) { log(`audit prune failed: ${e.message}`); } };
+  prune();
+  setInterval(prune, 60 * 60 * 1000).unref();
 })().catch((e) => {
   log(`start failed: ${e.stack || e.message}`);
   process.exit(1);

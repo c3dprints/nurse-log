@@ -197,6 +197,13 @@ tr.click:hover td { background: var(--panel-2); }
 .zoom-offer { position: fixed; top: 16px; right: 16px; z-index: 55; width: 320px; max-width: calc(100vw / var(--zoom, 1) - 32px); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); padding: 14px 16px; }
 .zoom-offer p { margin: 6px 0 10px; }
 .zoom-offer .row { justify-content: flex-end; margin-top: 12px; }
+/* Photos: students and users */
+.avatar { border-radius: 50%; object-fit: cover; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--accent-2); color: var(--accent); font-weight: 700; border: 1px solid var(--line); }
+.photo-btn { border: 0; background: none; padding: 0; cursor: pointer; border-radius: 50%; }
+.photo-btn:hover .avatar, .photo-btn:focus-visible .avatar { box-shadow: 0 0 0 3px var(--accent-2), 0 0 0 4px var(--accent); }
+.photo-big { display: flex; justify-content: center; margin: 6px 0 12px; }
+.with-photo { display: inline-flex; align-items: center; gap: 10px; }
+.who { display: flex; align-items: center; gap: 10px; }
 #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 6px; max-width: 460px; box-shadow: 0 6px 18px rgba(0,0,0,.2); word-break: break-word; }
 .toast.bad { background: var(--danger); color: #fff; }

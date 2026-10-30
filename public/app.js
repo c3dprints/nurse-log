@@ -156,6 +156,64 @@ function modal(title, body, actions = [], { wide = false, noDismiss = false } = 
   return { close, box };
 }
 
+// ---- photos ----------------------------------------------------------------------
+// Round photo for a student or user, or their initials when there is none. `at` is
+// the photo's last change, which also busts the browser's copy.
+function avatar(kind, id, at, name, size = 40) {
+  const style = `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.38)}px`;
+  if (at) return h('img', { class: 'avatar', src: `/api/photos/${kind}/${id}?v=${at}`, alt: '', style, draggable: 'false' });
+  const initials = String(name || '').trim().split(/\s+/).map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+  return h('span', { class: 'avatar empty', 'aria-hidden': 'true', style }, initials || '?');
+}
+
+// Picks a picture (camera or files on a phone) and makes a 360 px square JPEG of its
+// middle, small enough to keep in the database. Resolves null when nothing was picked.
+function pickPhoto() {
+  return new Promise((resolve, reject) => {
+    const input = h('input', { type: 'file', accept: 'image/*', style: 'display:none' });
+    input.addEventListener('change', () => {
+      const file = input.files && input.files[0];
+      input.remove();
+      if (!file) return resolve(null);
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const side = Math.min(img.naturalWidth, img.naturalHeight);
+        const c = document.createElement('canvas');
+        c.width = c.height = 360;
+        c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 360, 360);
+        URL.revokeObjectURL(url);
+        resolve(c.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('that picture could not be opened; try a JPEG or PNG')); };
+      img.src = url;
+    });
+    document.body.append(input);
+    input.click();
+  });
+}
+
+function photoDialog({ title, kind, id, at, name, save, remove, done }) {
+  const err = errBox();
+  const shown = h('div', { class: 'photo-big' }, avatar(kind, id, at, name, 180));
+  const m = modal(title, [shown, err, h('p', { class: 'muted small' }, 'Pick a picture or take one with a phone\u2019s camera. The middle of it is kept as a small square.')], [
+    ...(at ? [['Remove photo', async () => {
+      try { const r = await remove(); m.close(); toast('Photo removed'); done(r); } catch (e) { showErr(err, e.message); }
+    }, 'danger']] : []),
+    ['Cancel', () => m.close()],
+    [at ? 'Choose another' : 'Choose photo', async () => {
+      try {
+        const data = await pickPhoto();
+        if (!data) return;
+        const r = await save(data);
+        m.close();
+        toast('Photo saved');
+        done(r);
+      } catch (e) { showErr(err, e.message); }
+    }, 'primary'],
+  ]);
+}
+
 function confirmBox(title, text, okLabel = 'OK', danger = false) {
   return new Promise((resolve) => {
     const m = modal(title, h('p', {}, text), [
@@ -675,7 +733,6 @@ const NAV = [
   ['students', 'Students', 'students', false, 'Students'],
   ['visits', 'Visit log', 'visits', false, 'Visits'],
   ['given', 'Medication log', 'meds', false, 'Meds'],
-  ['audit', 'Audit log', 'audit', true, 'Audit'],
 ];
 
 function renderShell() {
@@ -692,10 +749,11 @@ function renderShell() {
       h('div', { class: 'grow' }),
       navBtn(['settings', 'Settings', 'settings', false, 'Settings']),
       h('button', { class: 'nav nav-out', type: 'button', onclick: signOut }, icon('out'), 'Sign out'),
-      h('div', { class: 'who' }, h('b', {}, S.user.fullName), `${S.user.username} \u00B7 ${S.user.role}`)),
+      h('div', { class: 'who' }, avatar('user', S.user.id, S.user.photoAt, S.user.fullName, 34),
+        h('div', {}, h('b', {}, S.user.fullName), `${S.user.username} \u00B7 ${S.user.role}`))),
     main));
   offerUpdate();
-  const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, audit: viewAudit, settings: viewSettings };
+  const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, audit: async () => go('#/settings/audit'), settings: viewSettings };
   (views[r.name] || viewToday)(main, r).catch((e) => {
     if (e.message !== 'signed out') fill(main, h('div', { class: 'alert bad' }, e.message));
   });
@@ -796,7 +854,7 @@ async function viewStudents(main) {
     const r = await get(`/api/students?${new URLSearchParams({ q: q.value, grade: grade.value, archived: arch.checked ? '1' : '' })}`);
     if (grade.options.length === 1) for (const g of r.grades) grade.append(h('option', { value: g }, 'Grade ' + g));
     list.replaceChildren(table([
-      { label: 'Name', get: (s) => h('b', {}, fullName(s)) },
+      { label: 'Name', get: (s) => h('span', { class: 'with-photo' }, avatar('student', s.id, s.photo_at, fullName(s), 30), h('b', {}, fullName(s))) },
       { label: 'ID', get: (s) => s.student_no || '' },
       { label: 'Grade', get: (s) => s.grade || '' },
       { label: 'Homeroom', get: (s) => s.homeroom || '' },
@@ -866,7 +924,7 @@ function pickStudent(then) {
   const load = async () => {
     const r = await get(`/api/students?${new URLSearchParams({ q: q.value })}`);
     list.replaceChildren(table([
-      { label: 'Name', get: (s) => h('b', {}, fullName(s)) },
+      { label: 'Name', get: (s) => h('span', { class: 'with-photo' }, avatar('student', s.id, s.photo_at, fullName(s), 30), h('b', {}, fullName(s))) },
       { label: 'ID', get: (s) => s.student_no || '' },
       { label: 'Grade', get: (s) => s.grade || '' },
       { label: 'Allergies', get: (s) => (s.allergies ? h('span', { class: 'pill bad' }, s.allergies) : '') },
@@ -894,6 +952,10 @@ async function viewStudent(main, r) {
   const body = h('div', {});
   fill(main, 
     h('div', { class: 'head' },
+      h('button', { class: 'photo-btn', type: 'button', title: s.photo_at ? 'Change or remove photo' : 'Add a photo', 'aria-label': `Photo of ${s.first_name} ${s.last_name}`, onclick: () => photoDialog({
+        title: `Photo of ${s.first_name} ${s.last_name}`, kind: 'student', id: s.id, at: s.photo_at, name: `${s.first_name} ${s.last_name}`,
+        save: (data) => post(`/api/students/${s.id}/photo`, { data }), remove: () => post(`/api/students/${s.id}/photo/remove`), done: reload,
+      }) }, avatar('student', s.id, s.photo_at, `${s.first_name} ${s.last_name}`, 64)),
       h('div', {}, h('div', { class: 'namerow' }, h('h1', {}, `${s.first_name} ${s.last_name}`),
         h('button', { class: 'btn small', type: 'button', title: 'Edit student info', 'aria-label': `Edit ${s.first_name} ${s.last_name}`, onclick: () => studentForm(s, reload) }, '✎ Edit')),
         h('div', { class: 'muted' }, [s.student_no && `ID ${s.student_no}`, s.grade && `Grade ${s.grade}`, s.homeroom, s.dob && `DOB ${s.dob} (${age(s.dob)})`].filter(Boolean).join(' \u00B7 '))),
@@ -1370,6 +1432,14 @@ function setAccount(body) {
   const err3 = errBox();
   const rpw = h('input', { type: 'password', autocomplete: 'current-password', style: 'max-width:260px', placeholder: 'your password' });
   body.append(
+    section('Your photo',
+      h('div', { class: 'row' }, avatar('user', S.user.id, S.user.photoAt, S.user.fullName, 72),
+        h('button', { class: 'btn', type: 'button', onclick: () => photoDialog({
+          title: 'Your photo', kind: 'user', id: S.user.id, at: S.user.photoAt, name: S.user.fullName,
+          save: (data) => post('/api/account/photo', { data }), remove: () => post('/api/account/photo/remove'),
+          done: (r) => { S.user.photoAt = r.photoAt; renderShell(); },
+        }) }, S.user.photoAt ? 'Change or remove photo' : 'Add a photo')),
+      h('p', { class: 'muted small' }, 'Shows next to your name in the menu.')),
     section('Your details', err1, info, h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn primary', onclick: async () => {
       try { S.user = await post('/api/account', readForm(info)); toast('Saved'); renderShell(); } catch (e) { showErr(err1, e.message); }
     } }, 'Save details'))),
@@ -1756,9 +1826,20 @@ function setAi(body, d, reload) {
 }
 
 // Settings > Audit log: the same log as in the sidebar, inside Settings for admins.
-async function setAudit(body) {
+async function setAudit(body, d) {
   const box = h('div', { class: 'settings-log' });
-  body.append(h('p', { class: 'muted' }, 'Every sign-in, view, change, export, dictation and setting change, with who and when. Export it to Excel from here too.'), box);
+  const keep = h('select', { 'aria-label': 'Keep the audit log for' },
+    [[14, '14 days'], [30, '30 days'], [90, '90 days'], [365, '1 year'], [0, 'Forever']].map(([n, label]) => h('option', { value: n }, label)));
+  keep.value = String(d.settings.auditDays ?? 14);
+  keep.addEventListener('change', async () => {
+    const n = Number(keep.value);
+    if (n && !(await confirmBox('Keep less audit history?', `Entries older than ${keep.selectedOptions[0].textContent.toLowerCase()} are deleted now and every day from here on, including each student\u2019s History tab. Daily backups still hold older copies for 30 days.`, 'Keep ' + keep.selectedOptions[0].textContent))) { keep.value = String(d.settings.auditDays ?? 14); return; }
+    try { await post('/api/settings', { auditDays: n }); d.settings.auditDays = n; toast('Saved'); box.replaceChildren(); await viewAudit(box); } catch (e) { toast(e.message, true); }
+  });
+  body.append(h('p', { class: 'muted' }, 'Every sign-in, view, change, export, dictation and setting change, with who and when. Export it to Excel from here too.'),
+    h('div', { class: 'row', style: 'margin-bottom:12px' }, h('label', { class: 'check' }, 'Keep entries for ', keep)),
+    h('p', { class: 'muted small' }, 'Older entries are deleted automatically, including each student\u2019s History tab. Check what your district requires before choosing a short period.'),
+    box);
   await viewAudit(box);
 }
 

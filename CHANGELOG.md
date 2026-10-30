@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.17
+
+- Audit log is only in Settings > Audit log now (no longer in the main menu).
+- The audit log keeps the last 14 days: older entries are deleted automatically (also from each student's History tab). Admins can change it to 30 days, 90 days, 1 year or Forever in Settings > Audit log.
+- Photos: click the round picture on a student's page to add, change or remove their photo (on a phone you can take one with the camera). Photos also show in the student list. Each user can add their own photo in Settings > My account; it shows next to their name in the menu. Photos are kept small (a 360 px square) inside the records file, so backups include them, and only signed-in users can see them.
+
 ## 1.0.16
 
 - Pinning to the taskbar keeps the Nurse's Log icon: the Start menu and Desktop shortcuts now carry the same app ID as the window, so Windows pins Nurse's Log itself instead of Chrome or Edge. If you pinned it before, unpin that button and pin it again after this update.

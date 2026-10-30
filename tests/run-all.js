@@ -36,6 +36,16 @@ async function unit() {
   const auth = new Auth(db);
   const rec = new Records(db);
 
+  await test('audit entries older than the kept days are deleted, newer ones stay', () => {
+    const day = 24 * 60 * 60 * 1000;
+    db.run('INSERT INTO audit(at, action) VALUES(?, ?)', [Date.now() - 20 * day, 'old.thing']);
+    db.run('INSERT INTO audit(at, action) VALUES(?, ?)', [Date.now() - 2 * day, 'new.thing']);
+    assert.strictEqual(db.pruneAudit(0), 0, '0 keeps everything');
+    db.pruneAudit(14);
+    const left = db.all("SELECT action FROM audit WHERE action IN ('old.thing', 'new.thing')").map((a) => a.action);
+    assert.deepStrictEqual(left, ['new.thing']);
+  });
+
   await test('password hashing', () => {
     const h = hash('abc');
     assert(verify('abc', h));
@@ -506,6 +516,46 @@ async function httpTests() {
     await test('http: guardian phone over 10 digits is refused', async () => {
       assert.match((await req('POST', `/api/students/${sid}`, { guardian_phone: '555201334455' })).json.error, /10 digits/);
       assert.strictEqual((await req('POST', `/api/students/${sid}`, { guardian_phone: '555-201-3344' })).json.guardian_phone, '(555) 201-3344');
+    });
+
+    await test('http: student and profile photos are JPEGs, shown only when signed in', async () => {
+      const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1, 0xff, 0xd9]);
+      const data = `data:image/jpeg;base64,${jpeg.toString('base64')}`;
+      assert.strictEqual((await req('GET', `/api/photos/student/${sid}`)).status, 404);
+      assert.match((await req('POST', `/api/students/${sid}/photo`, { data: 'data:image/png;base64,iVBORw0KGgo=' })).json.error, /JPEG/);
+      assert.match((await req('POST', `/api/students/${sid}/photo`, { data: 'data:image/jpeg;base64,PHN2Zz4=' })).json.error, /not a JPEG/);
+      const r = await req('POST', `/api/students/${sid}/photo`, { data });
+      assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+      assert(r.json.photoAt > 0);
+      const img = await req('GET', `/api/photos/student/${sid}`, null, { raw: true });
+      assert.strictEqual(img.headers['content-type'], 'image/jpeg');
+      assert.strictEqual(img.headers['cache-control'], 'private, no-store');
+      assert(img.buf.equals(jpeg));
+      assert.strictEqual((await req('GET', `/api/students/${sid}`)).json.student.photo_at, r.json.photoAt);
+      assert((await req('GET', '/api/students')).json.students.some((s) => s.id === sid && s.photo_at === r.json.photoAt));
+      const me = await req('POST', '/api/account/photo', { data });
+      assert.strictEqual(me.status, 200);
+      const state = (await req('GET', '/api/state')).json;
+      assert.strictEqual(state.user.photoAt, me.json.photoAt);
+      assert.strictEqual((await req('GET', `/api/photos/user/${state.user.id}`, null, { raw: true })).status, 200);
+      const saved = cookie;
+      cookie = '';
+      assert.strictEqual((await req('GET', `/api/photos/student/${sid}`)).status, 401, 'signed-out users get no photos');
+      cookie = saved;
+      assert.strictEqual((await req('POST', `/api/students/${sid}/photo/remove`)).status, 200);
+      assert.strictEqual((await req('GET', `/api/photos/student/${sid}`)).status, 404);
+      assert.strictEqual((await req('POST', '/api/account/photo/remove')).status, 200);
+      assert.strictEqual((await req('GET', '/api/state')).json.user.photoAt, null);
+      const acts = (await req('GET', '/api/audit?q=photo')).json.map((a) => a.action);
+      assert(acts.includes('student.photo') && acts.includes('student.photo-removed') && acts.includes('account.photo'), acts.join());
+    });
+
+    await test('http: audit log keeps 14 days by default and the admin can change it', async () => {
+      assert.strictEqual((await req('GET', '/api/settings')).json.settings.auditDays, 14);
+      assert.strictEqual((await req('POST', '/api/settings', { auditDays: 7 })).status, 400);
+      assert.strictEqual((await req('POST', '/api/settings', { auditDays: 90 })).status, 200);
+      assert.strictEqual((await req('GET', '/api/settings')).json.settings.auditDays, 90);
+      assert.strictEqual((await req('POST', '/api/settings', { auditDays: 14 })).status, 200);
     });
 
     await test('http: password reset with recovery code, email not set up', async () => {
