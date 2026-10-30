@@ -19,6 +19,7 @@ const dialogs = require('./lib/dialogs');
 const updater = require('./lib/updater');
 const tailscale = require('./lib/tailscale');
 const ai = require('./lib/ai');
+const { giveWindowIcon } = require('./lib/windowicon');
 const qrcode = require('qrcode-generator');
 const pkg = require('./package.json');
 
@@ -390,6 +391,18 @@ function route(method, pattern, opts, fn) {
 }
 
 route('GET', '/api/ping', { open: true }, () => ({ app: APP, version: pkg.version }));
+
+// The page asks on every load: Edge puts its own taskbar app ID back on a reload,
+// which drops the window under a plain Edge icon. Only the office PC's window.
+let lastWindowIcon = 0;
+route('POST', '/api/window-icon', { open: true }, ({ req }) => {
+  if (NO_DIALOGS || isRemote(req)) return { ok: true, skipped: true };
+  if (Date.now() - lastWindowIcon > 3000) {
+    lastWindowIcon = Date.now();
+    giveWindowIcon(APP_DIR);
+  }
+  return { ok: true };
+});
 
 route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   app: APP, version: pkg.version, needsSetup: auth.needsSetup(),

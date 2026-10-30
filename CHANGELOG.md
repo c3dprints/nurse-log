@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.10
+
+- The taskbar shows the Nurse's Log icon again instead of Edge's. The helper that sets it never actually ran (Windows PowerShell started detached quits at once); the app now asks for it every time the page loads, which also brings the icon back after a reload or an update, when Edge puts its own icon back.
+
 ## 1.0.9
 
 - Phone layout: on a phone screen the sidebar becomes a bottom tab bar (Today, Students, Visits, Meds, Settings), and Today and each student's page get big New visit and Give dose buttons above it. Give dose opens the student's only medication straight away, or lists them as big buttons, with the nearest scheduled time filled in. Forms open full screen with Save always in reach. The PC layout is unchanged.

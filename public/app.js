@@ -1834,3 +1834,6 @@ async function waitForRestart() {
 // On the phone's HTTPS address this is what lets the browser offer "Install app".
 // Plain http cannot run it; there "Add to Home Screen" still makes a shortcut.
 if (location.protocol === 'https:' && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+// Keeps the app's own taskbar button and icon on the office PC after a reload (Edge resets them).
+if (location.protocol === 'http:') setTimeout(() => api('POST', '/api/window-icon', {}, { noReauth: true }).catch(() => {}), 1500);
