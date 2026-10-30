@@ -343,6 +343,22 @@ function cookieToken(req) {
 const setCookie = (token) => ({ 'Set-Cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/` });
 const clearCookie = { 'Set-Cookie': `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` };
 
+// A phone that stays signed in keeps this cookie for 30 days; the PIN unlocks it.
+const deviceCookie = (token) => `nl_device=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}`;
+const clearDeviceCookie = 'nl_device=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0';
+function deviceToken(req) {
+  const m = /(?:^|;\s*)nl_device=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
+  return m ? m[1] : null;
+}
+// PIN sign-in is for phones only; the office PC always uses the password.
+const pinAllowed = (req) => isRemote(req) && db.setting('pinSignIn', true) !== false;
+function deviceName(ua) {
+  ua = String(ua || '');
+  const kind = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? (/Mobile/.test(ua) ? 'Android phone' : 'Android tablet') : 'Browser';
+  const browser = /SamsungBrowser/.test(ua) ? 'Samsung Internet' : /EdgA?\//.test(ua) ? 'Edge' : /CriOS|Chrome\//.test(ua) ? 'Chrome' : /FxiOS|Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return browser ? `${kind}, ${browser}` : kind;
+}
+
 const aiSettings = () => ({ enabled: false, key: '', ...ai.DEFAULTS, ...(db.setting('ai', {}) || {}) });
 
 function settingsPublic() {
@@ -351,6 +367,7 @@ function settingsPublic() {
   return {
     schoolName: db.setting('schoolName', ''),
     idleMinutes: db.setting('idleMinutes', 15),
+    pinSignIn: db.setting('pinSignIn', true) !== false,
     exportFolder: db.setting('exportFolder', ''),
     autoUpdate: db.setting('autoUpdate', false),
     smtp: { host: s.host || '', port: s.port || 587, user: s.user || '', from: s.from || '', hasPass: !!s.pass },
@@ -382,6 +399,12 @@ route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   theme: user ? db.setting(`theme:${user.id}`, 'system') : null,
   dictateKey: user ? db.setting(`dictateKey:${user.id}`, DEFAULT_DICTATE_KEY) : null,
   remote: isRemote(req),
+  pinSignIn: db.setting('pinSignIn', true) !== false,
+  device: (() => {
+    if (!pinAllowed(req)) return null;
+    const d = auth.device(deviceToken(req));
+    return d ? { name: d.name, username: d.user.username, fullName: d.user.full_name } : null;
+  })(),
   aiReady: user ? ai.configured(aiSettings()) : false,
 }));
 
@@ -451,6 +474,56 @@ route('POST', '/api/login', { open: true }, ({ body, res, req }) => {
   db.audit(r.user, 'login', { details: from });
   res.extraHeaders = setCookie(r.token);
   return { user: auth.publicUser(r.user) };
+});
+
+// Unlocks a remembered phone with its PIN.
+route('POST', '/api/login/pin', { open: true }, ({ body, res, req }) => {
+  if (!pinAllowed(req)) throw fail(400, 'PIN sign-in is not available here; use your password');
+  const r = auth.pinLogin(deviceToken(req), body.pin);
+  const from = `Tailscale ${clientIp(req)}${viaServe(req) ? ' (https)' : ''}`;
+  if (r.error) {
+    if (r.device) db.audit(r.device.user, r.forgotten ? 'device.locked' : 'login.pin-failed', { details: { device: r.device.name, from } });
+    if (r.forgotten) res.extraHeaders = { 'Set-Cookie': clearDeviceCookie };
+    throw fail(401, r.error);
+  }
+  db.audit(r.user, 'login', { details: { method: 'PIN', device: r.device.name, from } });
+  res.extraHeaders = setCookie(r.token);
+  return { user: auth.publicUser(r.user) };
+});
+
+// Remembers this phone for the signed-in user, unlocked later with a PIN.
+route('POST', '/api/device/remember', ({ body, user, req, res }) => {
+  if (!pinAllowed(req)) throw fail(400, isRemote(req) ? 'an admin has turned PIN sign-in off' : 'PIN sign-in is only for phones');
+  const name = deviceName(req.headers['user-agent']);
+  let made;
+  try { made = auth.rememberDevice(user.id, body.pin, name); } catch (e) { throw fail(400, e.message); }
+  const old = auth.device(deviceToken(req));
+  if (old) auth.forgetDevice(old.id, old.user_id);
+  db.audit(user, 'device.remember', { details: { device: name, from: `Tailscale ${clientIp(req)}` } });
+  res.extraHeaders = { 'Set-Cookie': deviceCookie(made.token) };
+  return { device: { name, username: user.username, fullName: user.full_name } };
+});
+
+// Forgets the phone this request comes from (works signed out, from the PIN screen).
+route('POST', '/api/device/forget', { open: true }, ({ req, res }) => {
+  const d = auth.device(deviceToken(req));
+  if (d) {
+    auth.forgetDevice(d.id, d.user_id);
+    db.audit(d.user, 'device.forget', { details: { device: d.name } });
+  }
+  res.extraHeaders = { 'Set-Cookie': clearDeviceCookie };
+  return { ok: true };
+});
+
+route('GET', '/api/account/devices', ({ user, req }) => {
+  const mine = auth.device(deviceToken(req));
+  return auth.devices(user.id).map((d) => ({ ...d, thisOne: !!mine && mine.id === d.id }));
+});
+
+route('POST', '/api/account/devices/:id/remove', ({ params, user }) => {
+  if (!auth.forgetDevice(params.id, user.id)) throw fail(404, 'not found');
+  db.audit(user, 'device.forget', { details: { id: params.id } });
+  return { ok: true };
 });
 
 route('POST', '/api/logout', { open: true }, ({ user, token, body, res }) => {
@@ -628,7 +701,7 @@ route('POST', '/api/users/:id', { admin: true }, ({ params, body, user }) => {
     if (admins <= 1) throw fail(400, 'keep at least one active admin');
   }
   db.run('UPDATE users SET full_name = ?, email = ?, role = ?, active = ? WHERE id = ?', [fullName, email, role, active, u.id]);
-  if (!active) auth.endSessionsFor(u.id);
+  if (!active) { auth.endSessionsFor(u.id); auth.forgetDevices(u.id); }
   db.audit(user, 'user.update', { entity: 'user', entityId: u.id, details: { username: u.username, fullName, email, role, active: !!active } });
   return auth.publicUser(auth.user(u.id));
 });
@@ -662,6 +735,12 @@ route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
     if (f && !fs.existsSync(f)) throw fail(400, `folder not found: ${f}`);
     db.setSetting('exportFolder', f);
     changed.exportFolder = f;
+  }
+  if ('pinSignIn' in body) {
+    const on = !!body.pinSignIn;
+    db.setSetting('pinSignIn', on);
+    if (!on) auth.forgetDevices(); // every remembered phone signs in with a password again
+    changed.pinSignIn = on;
   }
   if ('autoUpdate' in body) { db.setSetting('autoUpdate', !!body.autoUpdate); changed.autoUpdate = !!body.autoUpdate; }
   if ('remoteAccess' in body) {

@@ -12,7 +12,7 @@ const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const { Db } = require('../lib/db');
-const { Auth, hash, verify, checkPassword } = require('../lib/auth');
+const { Auth, hash, verify, checkPassword, checkPin } = require('../lib/auth');
 const { Records, parseTimes, phone } = require('../lib/records');
 const ai = require('../lib/ai');
 const excel = require('../lib/excel');
@@ -60,6 +60,23 @@ async function unit() {
     assert.match(auth.login('nurse1', PW).error, /too many/);
     db.run('UPDATE users SET locked_until = 0 WHERE id = ?', [admin.id]);
     assert(auth.login('nurse1', PW).token);
+  });
+
+  await test('phone PINs: rules, five wrong forget the phone, new password forgets', () => {
+    for (const bad of ['123', '1234', '0000', '987654', '12a4', '123456789']) assert(checkPin(bad), bad);
+    assert.strictEqual(checkPin('4719'), null);
+    const { token } = auth.rememberDevice(admin.id, '4719', 'iPhone, Safari');
+    assert.strictEqual(auth.device(token).user.id, admin.id);
+    assert(auth.pinLogin(token, '4719').token);
+    for (let i = 0; i < 4; i++) assert.match(auth.pinLogin(token, '0001').error, /wrong PIN/);
+    assert.match(auth.pinLogin(token, '0001').error, /forgotten/);
+    assert.strictEqual(auth.device(token), null);
+    assert.match(auth.pinLogin(token, '4719').error, /no longer remembered/);
+    const again = auth.rememberDevice(admin.id, '4719', 'iPhone, Safari');
+    assert.strictEqual(auth.devices(admin.id).length, 1);
+    auth.setPassword(admin.id, PW);
+    assert.strictEqual(auth.device(again.token), null, 'a new password forgets phones');
+    assert.strictEqual(auth.devices(admin.id).length, 0);
   });
 
   await test('sessions expire when idle', () => {
@@ -240,7 +257,14 @@ function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1' } 
       res.on('end', () => {
         const buf = Buffer.concat(chunks);
         const sc = res.headers['set-cookie'];
-        if (sc) { const kv = sc[0].split(';')[0]; cookie = kv.endsWith('=') ? '' : kv; }
+        if (sc) { // a small cookie jar: the session cookie plus a phone's PIN cookie
+          const jar = new Map(cookie ? cookie.split('; ').map((kv) => [kv.split('=')[0], kv]) : []);
+          for (const c of sc) {
+            const kv = c.split(';')[0];
+            if (kv.endsWith('=')) jar.delete(kv.split('=')[0]); else jar.set(kv.split('=')[0], kv);
+          }
+          cookie = [...jar.values()].join('; ');
+        }
         let json = null;
         if (!raw) try { json = JSON.parse(buf.toString()); } catch { /* not json */ }
         resolve({ status: res.statusCode, json, buf, headers: res.headers });
@@ -474,6 +498,48 @@ async function httpTests() {
       assert.strictEqual((await req('GET', '/api/remote')).json.https.on, false, 'HTTPS goes off with remote access');
       assert.strictEqual((await req('GET', '/api/state', null, served('100.101.2.3'))).status, 403, 'served requests refused while off');
       await assert.rejects(req('GET', '/api/ping', null, { ip: TS_IP }), 'listener closed when turned off');
+    });
+
+    await test('http: a phone stays signed in with a PIN; the PC never does', async () => {
+      assert.match((await req('POST', '/api/device/remember', { pin: '4719' })).json.error, /only for phones/);
+      await req('POST', '/api/settings', { remoteAccess: true });
+      const pcCookie = cookie;
+      cookie = '';
+      const phone = { ip: TS_IP, headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Version/18.0 Mobile/15E148 Safari/604.1' } };
+      assert.strictEqual((await req('POST', '/api/login', { username: 'admin', password: 'New password 77' }, phone)).status, 200);
+      assert.match((await req('POST', '/api/device/remember', { pin: '1234' }, phone)).json.error, /harder to guess/);
+      assert.strictEqual((await req('POST', '/api/device/remember', { pin: '4719' }, phone)).json.device.name, 'iPhone, Safari');
+      assert.match(cookie, /nl_device=/);
+      await req('POST', '/api/logout', {}, phone);
+      assert.doesNotMatch(cookie, /nl_session=/);
+      const st = (await req('GET', '/api/state', null, phone)).json;
+      assert.strictEqual(st.user, null);
+      assert.strictEqual(st.device.username, 'admin', 'signed out, the phone still offers the PIN');
+      assert.match((await req('POST', '/api/login/pin', { pin: '0000' }, phone)).json.error, /4 tries left/);
+      assert.strictEqual((await req('POST', '/api/login/pin', { pin: '4719' }, phone)).status, 200);
+      assert.strictEqual((await req('GET', '/api/state', null, phone)).json.user.username, 'admin');
+      const devs = (await req('GET', '/api/account/devices', null, phone)).json;
+      assert.strictEqual(devs.length, 1);
+      assert.strictEqual(devs[0].thisOne, true);
+      const phoneCookie = cookie;
+      cookie = pcCookie;
+      // The office PC never gets the PIN screen, even holding the phone's cookie.
+      assert.strictEqual((await req('GET', '/api/state', null, { headers: { Cookie: phoneCookie } })).json.device, null);
+      assert.match((await req('POST', '/api/login/pin', { pin: '4719' }, { headers: { Cookie: phoneCookie } })).json.error, /not available/);
+      const acts = (await req('GET', '/api/audit')).json;
+      assert(acts.some((a) => a.action === 'login' && /PIN/.test(a.details)), 'PIN sign-in audited');
+      assert(acts.some((a) => a.action === 'login.pin-failed'), 'wrong PIN audited');
+      assert(acts.some((a) => a.action === 'device.remember'), 'remembering audited');
+      // An admin turning PIN sign-in off forgets every phone.
+      assert.strictEqual((await req('POST', '/api/settings', { pinSignIn: false })).json.pinSignIn, false);
+      assert.strictEqual((await req('GET', '/api/state', null, { ...phone, headers: { ...phone.headers, Cookie: phoneCookie } })).json.device, null);
+      assert.match((await req('POST', '/api/login/pin', { pin: '4719' }, { ...phone, headers: { ...phone.headers, Cookie: phoneCookie } })).json.error, /not available/);
+      assert.strictEqual((await req('POST', '/api/settings', { pinSignIn: true })).json.pinSignIn, true);
+      cookie = phoneCookie;
+      assert.match((await req('POST', '/api/login/pin', { pin: '4719' }, phone)).json.error, /no longer remembered/);
+      assert.doesNotMatch(cookie, /nl_device=/, 'the forgotten cookie is cleared');
+      cookie = pcCookie;
+      assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: false })).status, 200);
     });
 
     await test('http: static files', async () => {

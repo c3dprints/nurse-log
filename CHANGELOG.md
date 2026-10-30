@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.9
+
+- Phone layout: on a phone screen the sidebar becomes a bottom tab bar (Today, Students, Visits, Meds, Settings), and Today and each student's page get big New visit and Give dose buttons above it. Give dose opens the student's only medication straight away, or lists them as big buttons, with the nearest scheduled time filled in. Forms open full screen with Save always in reach. The PC layout is unchanged.
+- Stay signed in on your own phone: after signing in on a phone with your password you can choose a 4 to 8 digit PIN, and next time just type the PIN. It still locks after the idle minutes. A phone is forgotten after 30 days, 5 wrong PINs, a password change, or the account being turned off. Choose "Not on this phone" on a shared phone. Manage remembered phones in Settings > My account; admins can turn PIN sign-in off in School & security (that forgets every phone). The office PC always uses the password. PIN sign-ins and wrong PINs are in the audit log.
+
 ## 1.0.8
 
 - Edit button next to the student's name on the student page opens Edit info in one click.

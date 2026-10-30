@@ -110,22 +110,27 @@ function reauth() {
   if (reauthing) return reauthing;
   reauthing = new Promise((resolve, reject) => {
     const err = errBox();
-    const pw = h('input', { type: 'password', autocomplete: 'current-password' });
+    const byPin = !!(S.device && S.device.username === S.user.username);
+    const pw = byPin ? pinInput() : h('input', { type: 'password', autocomplete: 'current-password' });
     const submit = async () => {
       try {
-        await api('POST', '/api/login', { username: S.user.username, password: pw.value }, { noReauth: true });
+        if (byPin) await api('POST', '/api/login/pin', { pin: pw.value }, { noReauth: true });
+        else await api('POST', '/api/login', { username: S.user.username, password: pw.value }, { noReauth: true });
         m.close();
         reauthing = null;
         lastActive = Date.now();
         resolve();
       } catch (e) {
         showErr(err, e.message);
+        pw.value = '';
+        // The phone was forgotten (too many wrong PINs): ask for the password instead.
+        if (byPin && /password/.test(e.message)) { S.device = null; m.close(); reauthing = null; reauth().then(resolve, reject); }
       }
     };
     pw.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     const m = modal('You were signed out', [
-      h('p', { class: 'muted' }, `Nurse’s Log signs out after ${S.idleMinutes} idle minutes. Sign in again as ${S.user.username} to continue; anything you were typing is kept.`),
-      err, h('label', {}, 'Password'), pw,
+      h('p', { class: 'muted' }, `Nurse’s Log signs out after ${S.idleMinutes} idle minutes. ${byPin ? 'Enter your PIN' : `Sign in again as ${S.user.username}`} to continue; anything you were typing is kept.`),
+      err, h('label', {}, byPin ? 'PIN' : 'Password'), pw,
     ], [
       ['Sign out', () => { m.close(); reauthing = null; S.user = null; reject(new Error('signed out')); renderLogin(); }],
       ['Sign in', submit, 'primary'],
@@ -275,7 +280,7 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 
 // ---- app state and routing ------------------------------------------------------
 
-const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false, dictateKey: 'F2', board: null };
+const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false, dictateKey: 'F2', board: null, device: null, pinSignIn: true };
 const $app = document.getElementById('app');
 
 // [key, name, kind, swatch colors: background, panel, accent, style]
@@ -315,7 +320,7 @@ async function loadState() {
   if (st.theme) applyTheme(st.theme);
   Object.assign(S, {
     user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady,
-    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady, dictateKey: st.dictateKey || 'F2',
+    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady, dictateKey: st.dictateKey || 'F2', device: st.device || null, pinSignIn: st.pinSignIn !== false,
   });
 }
 
@@ -408,7 +413,44 @@ function showRecovery(code, then, own = false) {
   ], [['I saved it', () => { m.close(); then(); }, 'primary']], { noDismiss: true });
 }
 
-function renderLogin(note) {
+const pinInput = () => h('input', { type: 'password', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 8, autocomplete: 'off', class: 'pin' });
+
+// A remembered phone opens on its PIN; "Use password instead" shows the normal sign-in.
+function renderPin(note) {
+  const err = errBox();
+  const pin = pinInput();
+  const d = S.device;
+  gate(`Welcome back, ${d.fullName.split(' ')[0]}`, `Enter your PIN to open Nurse’s Log on this ${d.name.split(',')[0]}.`,
+    note ? h('div', { class: 'alert warn' }, note) : null,
+    h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const r = await api('POST', '/api/login/pin', { pin: pin.value }, { noReauth: true });
+          S.user = r.user;
+          lastActive = Date.now();
+          await loadState();
+          render();
+        } catch (ex) {
+          pin.value = '';
+          if (/password/.test(ex.message)) { S.device = null; renderLogin(ex.message, true); return; }
+          showErr(err, ex.message);
+        }
+      },
+    }, err,
+    field('PIN', pin),
+    h('button', { class: 'btn primary', type: 'submit' }, 'Unlock'),
+    h('div', { class: 'row', style: 'justify-content:space-between' },
+      h('button', { class: 'linkbtn', type: 'button', onclick: () => renderLogin(null, true) }, 'Use password instead'),
+      h('button', { class: 'linkbtn', type: 'button', onclick: async () => {
+        await api('POST', '/api/device/forget', {}, { noReauth: true }).catch(() => {});
+        S.device = null;
+        renderLogin('This phone was forgotten. Sign in with your password.', true);
+      } }, 'Forget this phone'))));
+}
+
+function renderLogin(note, usePassword = false) {
+  if (S.device && !usePassword) return renderPin(note);
   const err = errBox();
   const user = h('input', { type: 'text', autocomplete: 'username' });
   const pw = h('input', { type: 'password', autocomplete: 'current-password' });
@@ -423,6 +465,7 @@ function renderLogin(note) {
           lastActive = Date.now();
           await loadState();
           render();
+          offerPin();
         } catch (ex) { showErr(err, ex.message); pw.select(); }
       },
     }, err,
@@ -508,6 +551,40 @@ function renderMustChange() {
     h('button', { class: 'linkbtn', type: 'button', onclick: signOut }, 'Sign out')));
 }
 
+// After a password sign-in on a phone: offer to stay signed in with a PIN.
+// "Not on this phone" is remembered on the phone so a shared phone is not asked again.
+function offerPin(asked = false) {
+  if (!S.user || !S.remote || !S.pinSignIn || S.user.mustChange) return;
+  if (S.device && S.device.username === S.user.username && !asked) return;
+  let never = false;
+  try { never = localStorage.getItem('nl.noPin') === '1'; } catch { /* storage off */ }
+  if (never && !asked) return;
+  const err = errBox();
+  const p1 = pinInput();
+  const p2 = pinInput();
+  const m = modal('Stay signed in on this phone?', [
+    h('p', {}, `Next time, open Nurse’s Log with a short PIN instead of your password. It still locks after ${S.idleMinutes} idle minutes, and forgets this phone after 30 days or 5 wrong PINs.`),
+    h('div', { class: 'alert warn' }, 'Only on your own phone. On a shared phone choose Not on this phone.'),
+    err,
+    field('Choose a PIN (4 to 8 digits)', p1),
+    field('Type it again', p2),
+  ], [
+    ['Not on this phone', () => { try { localStorage.setItem('nl.noPin', '1'); } catch { /* storage off */ } m.close(); }],
+    ['Not now', () => m.close()],
+    ['Use a PIN', async () => {
+      if (p1.value !== p2.value) return showErr(err, 'the two PINs do not match');
+      try {
+        const r = await post('/api/device/remember', { pin: p1.value });
+        S.device = r.device;
+        try { localStorage.removeItem('nl.noPin'); } catch { /* storage off */ }
+        m.close();
+        toast('This phone stays signed in. Use your PIN next time.');
+        if (route().name === 'settings') render();
+      } catch (e) { showErr(err, e.message); }
+    }, 'primary'],
+  ]);
+}
+
 async function signOut() {
   await api('POST', '/api/logout', {}, { noReauth: true }).catch(() => {});
   S.user = null;
@@ -517,26 +594,29 @@ async function signOut() {
 
 // ---- shell -----------------------------------------------------------------------
 
+// [route, label, icon, admin only, short label for the phone tab bar]
 const NAV = [
-  ['today', 'Today', 'today'],
-  ['students', 'Students', 'students'],
-  ['visits', 'Visit log', 'visits'],
-  ['given', 'Medication log', 'meds'],
-  ['audit', 'Audit log', 'audit', true],
+  ['today', 'Today', 'today', false, 'Today'],
+  ['students', 'Students', 'students', false, 'Students'],
+  ['visits', 'Visit log', 'visits', false, 'Visits'],
+  ['given', 'Medication log', 'meds', false, 'Meds'],
+  ['audit', 'Audit log', 'audit', true, 'Audit'],
 ];
 
 function renderShell() {
   const r = route();
   const main = h('main', { class: 'main' });
   const navName = r.name === 'student' ? 'students' : r.name;
-  const navBtn = ([key, label, ic]) => h('button', { class: 'nav' + (navName === key ? ' on' : ''), type: 'button', onclick: () => go('#/' + key) }, icon(ic), label);
+  const navBtn = ([key, label, ic, admin, short]) => h('button', {
+    class: 'nav' + (navName === key ? ' on' : '') + (admin ? ' nav-admin' : ''), type: 'button', onclick: () => go('#/' + key),
+  }, icon(ic), h('span', { class: 'lbl' }, label), h('span', { class: 'lbl-s', 'aria-hidden': 'true' }, short || label));
   $app.replaceChildren(h('div', { class: 'shell' },
     h('nav', { class: 'side', 'aria-label': 'Main' },
       h('div', { class: 'brand' }, h('img', { src: 'icon.svg', alt: '' }), h('div', {}, h('b', {}, 'Nurse’s Log'), h('span', {}, S.schoolName || 'School nurse office'))),
       NAV.filter((n) => !n[3] || S.user.role === 'admin').map(navBtn),
       h('div', { class: 'grow' }),
-      navBtn(['settings', 'Settings', 'settings']),
-      h('button', { class: 'nav', type: 'button', onclick: signOut }, icon('out'), 'Sign out'),
+      navBtn(['settings', 'Settings', 'settings', false, 'Settings']),
+      h('button', { class: 'nav nav-out', type: 'button', onclick: signOut }, icon('out'), 'Sign out'),
       h('div', { class: 'who' }, h('b', {}, S.user.fullName), `${S.user.username} \u00B7 ${S.user.role}`)),
     main));
   const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, audit: viewAudit, settings: viewSettings };
@@ -577,7 +657,41 @@ async function viewToday(main) {
         { label: '', get: (r) => h('button', { class: 'btn small', onclick: () => giveForm(r, null, reload) }, 'Give') },
       ], t.meds.prn, { onRow: (r) => go(`#/student/${r.student_id}/meds`) })) : null,
     h('div', { class: 'panel' }, h('h2', {}, 'Visits today'),
-      table(visitCols(true), t.visits, { empty: 'No visits yet today.', onRow: (r) => go(`#/student/${r.student_id}/visits`) })));
+      table(visitCols(true), t.visits, { empty: 'No visits yet today.', onRow: (r) => go(`#/student/${r.student_id}/visits`) })),
+    phoneActions(
+      ['+ New visit', () => pickStudent((s) => visitForm(s, null, reload))],
+      ['\u{1F48A} Give dose', () => pickStudent((s) => giveDose(s, null, reload))]));
+}
+
+// Big buttons pinned above the tab bar on phones; hidden on the PC.
+function phoneActions(...buttons) {
+  return h('div', { class: 'phone-actions' }, buttons.map(([label, fn], i) => h('button', { class: 'btn' + (i === 0 ? ' primary' : ''), type: 'button', onclick: fn }, label)));
+}
+
+// Give dose for a student: one active medication opens straight away, several
+// are listed as big buttons. A scheduled medication gets its nearest time today.
+async function giveDose(s, meds, reload) {
+  if (!meds) meds = (await get(`/api/students/${s.id}`)).medications;
+  const active = meds.filter((m) => m.active);
+  const open = (m) => giveForm({ ...m, first_name: s.first_name, last_name: s.last_name, allergies: s.allergies }, nearestTime(m.times), reload);
+  if (!active.length) return toast(`${s.first_name} ${s.last_name} has no active medications`, true);
+  if (active.length === 1) return open(active[0]);
+  const m = modal(`Give which medication to ${s.first_name}?`, h('div', { class: 'pick-list' }, active.map((med) => h('button', { class: 'btn', type: 'button', onclick: () => { m.close(); open(med); } },
+    h('b', {}, med.name), h('span', { class: 'muted' }, [med.dose, med.times ? med.times.split(', ').map(fmtHM).join(', ') : 'as needed'].filter(Boolean).join(' \u00B7 '))))),
+  [['Cancel', () => m.close()]]);
+}
+
+// The scheduled time ("HH:MM") closest to now, or null for an as-needed medication.
+function nearestTime(times) {
+  if (!times) return null;
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  let best = null;
+  for (const t of times.split(', ')) {
+    const [H, M] = t.split(':').map(Number);
+    if (!best || Math.abs(H * 60 + M - mins) < Math.abs(best[1] - mins)) best = [t, H * 60 + M];
+  }
+  return best && best[0];
 }
 
 // Year plus the fraction of it gone by, e.g. 2026.82. Just for fun.
@@ -720,6 +834,9 @@ async function viewStudent(main, r) {
       ])),
     s.allergies ? h('div', { class: 'alert bad' }, h('b', {}, 'Allergies: '), s.allergies) : null,
     s.conditions ? h('div', { class: 'alert warn' }, h('b', {}, 'Conditions: '), s.conditions) : null,
+    phoneActions(
+      ['+ New visit', () => visitForm(s, null, () => go(`#/student/${s.id}/visits`))],
+      ['\u{1F48A} Give dose', () => giveDose(s, b.medications, reload)]),
     h('div', { class: 'panel' },
       h('div', { class: 'tabs', role: 'tablist' }, tabBtn('info', 'Info'), tabBtn('meds', `Medications (${b.medications.filter((m) => m.active).length})`),
         tabBtn('medlog', 'Medication log'), tabBtn('visits', `Visits (${b.visits.length})`), tabBtn('history', 'History')),
@@ -1190,11 +1307,39 @@ function setAccount(body) {
         err2.classList.add('hidden');
       } catch (e) { showErr(err2, e.message); }
     } }, 'Change password'))),
+    devicesSection(),
     shortcutSection(),
+    h('div', { class: 'phone-only', style: 'margin-bottom:22px' }, h('button', { class: 'btn', type: 'button', onclick: signOut }, 'Sign out')),
     section('Recovery code', h('p', { class: 'muted' }, 'Makes a new recovery code for resetting your password without email. The old code stops working. Enter your password to confirm.'),
       err3, h('div', { class: 'row' }, rpw, h('button', { class: 'btn', onclick: async () => {
         try { const r = await post('/api/account/recovery', { password: rpw.value }); rpw.value = ''; showRecovery(r.recovery, () => {}, true); } catch (e) { showErr(err3, e.message); }
       } }, 'Make new code'))));
+}
+
+// Settings > My account: phones that open with a PIN instead of the password.
+function devicesSection() {
+  const list = h('div', {});
+  const load = async () => {
+    const rows = await get('/api/account/devices');
+    list.replaceChildren(table([
+      { label: 'Phone', get: (d) => [h('b', {}, d.name), d.thisOne ? h('span', { class: 'pill ok', style: 'margin-left:6px' }, 'this one') : null] },
+      { label: 'Last used', nowrap: true, get: (d) => fmtDT(d.last_used) },
+      { label: 'Forgotten on', nowrap: true, get: (d) => new Date(d.expires).toLocaleDateString() },
+      { label: '', get: (d) => h('button', { class: 'btn small', type: 'button', onclick: async () => {
+        try { await post(`/api/account/devices/${d.id}/remove`); } catch (e) { return toast(e.message, true); }
+        if (d.thisOne) S.device = null;
+        toast('That phone will need your password next time');
+        load();
+      } }, 'Forget') },
+    ], rows, { empty: 'No phones are remembered.' }));
+  };
+  load().catch((e) => list.replaceChildren(h('div', { class: 'alert bad' }, e.message)));
+  return section('Phones that stay signed in',
+    h('p', { class: 'muted' }, 'These phones open with your PIN instead of your password. Forget one you lost or no longer use. Changing your password forgets them all.'),
+    S.pinSignIn ? null : h('p', { class: 'muted small' }, 'An admin has turned PIN sign-in off.'),
+    list,
+    S.remote && S.pinSignIn ? h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn', type: 'button', onclick: () => offerPin(true) },
+      S.device ? 'Change this phone\u2019s PIN' : 'Stay signed in on this phone')) : null);
 }
 
 // Settings > My account: the key that starts and stops dictation.
@@ -1316,7 +1461,7 @@ async function setRemote(body, _d, reload) {
       h('ol', { style: 'margin:0;padding-left:20px;line-height:1.8' },
         h('li', {}, 'Install Tailscale on this PC and on the phone, and sign both in to the same Tailscale account.'),
         h('li', {}, 'Turn on remote access above, then press Set up HTTPS (admin, once).'),
-        h('li', {}, 'On the phone, scan the QR code with the camera (or type the address) and sign in with your Nurse’s Log username and password.'),
+        h('li', {}, 'On the phone, scan the QR code with the camera (or type the address) and sign in with your Nurse’s Log username and password. On your own phone, choose a PIN when asked so next time you just type the PIN.'),
         h('li', {}, 'Install it: Android Chrome \u22EE menu > Install app (or Add to Home screen); iPhone Safari Share > Add to Home Screen. It then opens full screen from its own icon.')),
       h('p', { class: 'muted small' }, 'The connection is encrypted by Tailscale and only devices on your Tailscale can reach it; the school Wi-Fi cannot. The same password, lockout and auto sign-out apply, and every remote sign-in is in the audit log with the device’s address. "Save as" is not available from a phone; use Download.')),
     admin && on ? section('If the phone cannot connect',
@@ -1437,13 +1582,15 @@ function userForm(u, reload) {
 
 function setSchool(body, d, reload) {
   const err = errBox();
-  const form = formGrid([['schoolName', 'School name'], ['idleMinutes', 'Sign out after this many idle minutes', 'number', { min: 1 }]], d.settings);
+  const form = formGrid([['schoolName', 'School name'], ['idleMinutes', 'Sign out after this many idle minutes', 'number', { min: 1 }],
+    ['pinSignIn', 'Let people keep their own phone signed in and unlock it with a PIN (the office PC always uses the password; turning this off forgets every phone)', 'check', { wide: true }]], d.settings);
   body.append(section('School & security', err, form,
     h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn primary', onclick: async () => {
       try {
         const s = await post('/api/settings', readForm(form));
         S.schoolName = s.schoolName;
         S.idleMinutes = s.idleMinutes;
+        S.pinSignIn = s.pinSignIn;
         toast('Saved');
         renderShell();
       } catch (e) { showErr(err, e.message); }
