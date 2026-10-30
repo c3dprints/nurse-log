@@ -221,6 +221,7 @@ function fakeOpenAI() {
 }
 
 const TS_IP = '127.0.0.2'; // stands in for this PC's Tailscale address
+const TS_DNS = 'nurse-pc.tail-test.ts.net';
 let cookie = '';
 function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1' } = {}) {
   return new Promise((resolve, reject) => {
@@ -256,7 +257,7 @@ async function httpTests() {
   const exportDir = path.join(tmp, 'exports');
   fs.mkdirSync(exportDir);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1` },
+    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP, NL_TAILSCALE_DNS: TS_DNS, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1` },
     stdio: 'ignore', windowsHide: true,
   });
   const openai = await fakeOpenAI();
@@ -422,7 +423,7 @@ async function httpTests() {
       assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: true })).status, 200);
       r = (await req('GET', '/api/remote')).json;
       assert.deepStrictEqual(r.listening, [TS_IP]);
-      assert.deepStrictEqual(r.urls, [`http://${TS_IP}:${PORT}`]);
+      assert.deepStrictEqual(r.urls, [`http://${TS_DNS}:${PORT}`, `http://${TS_IP}:${PORT}`]);
       assert.strictEqual((await req('GET', '/api/state', null, { ip: TS_IP })).json.remote, true);
       assert.strictEqual((await req('GET', '/api/state')).json.remote, false);
       assert.strictEqual((await req('GET', '/api/ping', null, { ip: TS_IP, headers: { Host: `evil.com:${PORT}` } })).status, 403);
@@ -435,9 +436,25 @@ async function httpTests() {
       cookie = saved;
       const login = (await req('GET', '/api/audit?q=Tailscale')).json.find((a) => a.action === 'login');
       assert(login && /Tailscale 127.0.0.1/.test(login.details), 'remote sign-in is audited with the address');
+      // HTTPS through Tailscale Serve: requests reach 127.0.0.1 with the tailnet name as Host.
+      const served = (xff, extra = {}) => ({ headers: { Host: `${TS_DNS}:8943`, 'X-Forwarded-For': xff, ...extra } });
+      assert.strictEqual((await req('GET', '/api/remote')).json.https.on, false);
+      assert.match((await req('POST', '/api/remote/https', { on: true }, { ip: TS_IP })).json.error, /office PC/);
+      r = (await req('POST', '/api/remote/https', { on: true })).json;
+      assert.deepStrictEqual(r.https, { on: true, url: `https://${TS_DNS}:8943` });
+      assert.strictEqual((await req('GET', '/api/state', null, served('100.101.2.3'))).json.remote, true, 'served requests count as a phone');
+      assert.strictEqual((await req('GET', '/api/state', null, served('192.168.1.50'))).status, 403, 'only Tailscale devices');
+      assert.strictEqual((await req('POST', '/api/logout', {}, served('100.101.2.3', { Origin: 'https://evil.example' }))).status, 403);
+      assert.match((await req('POST', '/api/export', { kind: 'visits', target: 'saveas' }, served('100.101.2.3', { Origin: `https://${TS_DNS}:8943` }))).json.error, /office PC/);
+      assert.match((await req('POST', '/api/remote/https', { on: false }, served('100.101.2.3'))).json.error, /office PC/);
+      const qr = (await req('GET', `/api/remote/qr?url=${encodeURIComponent(`https://${TS_DNS}:8943`)}`)).json;
+      assert(qr.rows.length >= 21 && qr.rows.every((row) => /^[01]+$/.test(row) && row.length === qr.rows.length), 'square QR');
+      assert.strictEqual((await req('GET', `/api/remote/qr?url=${encodeURIComponent('https://evil.example')}`)).status, 400);
       assert.match((await req('POST', '/api/settings', { remoteAccess: false }, { ip: TS_IP })).json.error, /office PC/);
       assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: false })).status, 200);
       assert.deepStrictEqual((await req('GET', '/api/remote')).json.listening, []);
+      assert.strictEqual((await req('GET', '/api/remote')).json.https.on, false, 'HTTPS goes off with remote access');
+      assert.strictEqual((await req('GET', '/api/state', null, served('100.101.2.3'))).status, 403, 'served requests refused while off');
       await assert.rejects(req('GET', '/api/ping', null, { ip: TS_IP }), 'listener closed when turned off');
     });
 
@@ -446,6 +463,13 @@ async function httpTests() {
       assert.match(r.buf.toString(), /<title>Nurse’s Log<\/title>/);
       assert.match(r.headers['content-security-policy'], /script-src 'self'/);
       assert.strictEqual((await req('GET', '/app.js', null, { raw: true })).status, 200);
+      const man = await req('GET', '/manifest.webmanifest', null, { raw: true });
+      assert.match(man.headers['content-type'], /manifest\+json/);
+      const icons = JSON.parse(man.buf.toString()).icons;
+      for (const i of icons) assert.strictEqual((await req('GET', i.src, null, { raw: true })).headers['content-type'], 'image/png', i.src);
+      assert(icons.some((i) => i.purpose === 'maskable'));
+      assert.strictEqual((await req('GET', '/sw.js', null, { raw: true })).status, 200);
+      assert.match(r.buf.toString(), /rel="manifest"/);
     });
   } finally {
     child.kill();

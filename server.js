@@ -19,6 +19,7 @@ const dialogs = require('./lib/dialogs');
 const updater = require('./lib/updater');
 const tailscale = require('./lib/tailscale');
 const ai = require('./lib/ai');
+const qrcode = require('qrcode-generator');
 const pkg = require('./package.json');
 
 const APP = 'nurse-log';
@@ -131,10 +132,19 @@ async function syncRemote() {
   if (!enabled) remote.error = null;
 }
 
-function remoteInfo() {
+// HTTPS address state, asked of Tailscale at most every 10 seconds.
+let httpsCache = { at: 0, on: false };
+async function httpsInfo() {
+  const url = remote.dnsName ? `https://${remote.dnsName}:${tailscale.SERVE_PORT}` : null;
+  if (Date.now() - httpsCache.at > 10000) httpsCache = { at: Date.now(), on: await tailscale.serveState(remote.dnsName, PORT) };
+  return { on: httpsCache.on && !!url, url: httpsCache.on ? url : null };
+}
+
+async function remoteInfo() {
   const ips = [...remote.listeners.keys()];
   const found = tailscale.ips();
   return {
+    https: await httpsInfo(),
     enabled: !!db.setting('remoteAccess', false),
     state: remote.state,
     installed: remote.installed,
@@ -249,8 +259,20 @@ function allowedHosts() {
   return new Set(names.map((n) => `${n.toLowerCase()}:${PORT}`));
 }
 
-// A request that came in on a Tailscale listener rather than 127.0.0.1.
-const isRemote = (req) => String(req.socket.localAddress || '').replace(/^::ffff:/, '') !== HOST;
+// Tailscale Serve (the HTTPS address) hands phone requests to 127.0.0.1 with this
+// PC's tailnet name as Host and the phone's address in X-Forwarded-For. They are
+// phone requests and never get the trust a request from this PC gets.
+const localAddr = (req) => String(req.socket.localAddress || '').replace(/^::ffff:/, '');
+const servedHost = (req) => String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '');
+const viaServe = (req) => !!remote.dnsName && localAddr(req) === HOST && servedHost(req) === remote.dnsName.toLowerCase();
+
+// A request from another device: on a Tailscale listener, or through Serve.
+const isRemote = (req) => localAddr(req) !== HOST || viaServe(req);
+
+// The device's address, for the audit log.
+const clientIp = (req) => (viaServe(req)
+  ? String(req.headers['x-forwarded-for'] || '').split(',').pop().trim()
+  : String(req.socket.remoteAddress || '').replace(/^::ffff:/, ''));
 
 // Any web page can fire requests at localhost. The Host check stops DNS
 // rebinding; Sec-Fetch-Site and Origin keep other sites off the API; the custom
@@ -258,16 +280,26 @@ const isRemote = (req) => String(req.socket.localAddress || '').replace(/^::ffff
 // also come from a Tailscale address while remote access is switched on.
 function guard(req) {
   const hosts = allowedHosts();
-  if (!hosts.has(String(req.headers.host || '').toLowerCase())) return 'bad host';
+  const served = viaServe(req);
+  if (!served && !hosts.has(String(req.headers.host || '').toLowerCase())) return 'bad host';
   if (isRemote(req)) {
     if (!db.setting('remoteAccess', false)) return 'remote access is off';
-    const peer = req.socket.remoteAddress;
-    if (!tailscale.inTailnet(peer) && !tailscale.isLoopback(peer)) return 'not a Tailscale device';
+    if (served) {
+      if (!tailscale.inTailnet(clientIp(req))) return 'not a Tailscale device';
+    } else {
+      const peer = req.socket.remoteAddress;
+      if (!tailscale.inTailnet(peer) && !tailscale.isLoopback(peer)) return 'not a Tailscale device';
+    }
   }
   const site = req.headers['sec-fetch-site'];
   if (req.url.startsWith('/api/') && site && site !== 'same-origin' && site !== 'none') return 'cross-site request';
   const o = req.headers.origin;
-  if (o && !hosts.has(o.replace(/^http:\/\//, '').toLowerCase())) return 'bad origin';
+  if (o) {
+    const ok = served
+      ? o.toLowerCase() === `https://${servedHost(req)}:${tailscale.SERVE_PORT}`
+      : hosts.has(o.replace(/^http:\/\//, '').toLowerCase());
+    if (!ok) return 'bad origin';
+  }
   if (req.method === 'POST' && req.headers['x-nurse-log'] !== '1') return 'missing header';
   return null;
 }
@@ -355,6 +387,44 @@ route('GET', '/api/state', { open: true }, ({ user, req }) => ({
 // Where to open the app from a phone. Any signed-in user can see it; only an admin can switch it on.
 route('GET', '/api/remote', () => remoteInfo());
 
+// Turns the HTTPS address (Tailscale Serve) on or off. Done at the office PC only.
+route('POST', '/api/remote/https', { admin: true }, async ({ body, user, req }) => {
+  if (isRemote(req)) throw fail(400, 'set up HTTPS from the office PC');
+  const on = !!body.on;
+  if (on && !db.setting('remoteAccess', false)) throw fail(400, 'turn on remote access first');
+  await syncRemote();
+  if (remote.state !== 'Running' || !remote.dnsName) throw fail(400, 'Tailscale is not connected on this PC, or MagicDNS is off');
+  const r = await tailscale.serve(on, PORT);
+  httpsCache.at = 0;
+  const info = await remoteInfo();
+  log(`remote access: HTTPS ${on ? 'on' : 'off'} requested, now ${info.https.on ? 'on' : 'off'}${r.ok ? '' : ` (${r.out.trim().slice(0, 200)})`}`);
+  db.audit(user, 'settings.remote-https', { details: { on: info.https.on } });
+  if (on && !info.https.on) {
+    // Usually HTTPS certificates are switched off for the tailnet; Tailscale prints where to switch them on.
+    info.https.enableUrl = (r.out.match(/https:\/\/login\.tailscale\.com\/\S+/) || [])[0] || 'https://login.tailscale.com/admin/dns';
+    info.https.message = r.out.trim().slice(0, 300);
+  }
+  return info;
+});
+
+// QR code for one of this app's own addresses, as rows of 0/1 for the page to draw.
+route('GET', '/api/remote/qr', async ({ query }) => {
+  const info = await remoteInfo();
+  const allowed = [...info.urls, info.https.url].filter(Boolean);
+  if (!allowed.includes(query.url)) throw fail(400, 'not an address of this app');
+  const q = qrcode(0, 'M');
+  q.addData(query.url);
+  q.make();
+  const n = q.getModuleCount();
+  const rows = [];
+  for (let r = 0; r < n; r++) {
+    let line = '';
+    for (let c = 0; c < n; c++) line += q.isDark(r, c) ? '1' : '0';
+    rows.push(line);
+  }
+  return { url: query.url, rows };
+});
+
 route('POST', '/api/setup', { open: true }, ({ body, res }) => {
   if (!auth.needsSetup()) throw fail(400, 'setup is already done');
   let made;
@@ -372,7 +442,7 @@ route('POST', '/api/setup', { open: true }, ({ body, res }) => {
 
 route('POST', '/api/login', { open: true }, ({ body, res, req }) => {
   const r = auth.login(body.username, body.password);
-  const from = isRemote(req) ? { from: `Tailscale ${String(req.socket.remoteAddress).replace(/^::ffff:/, '')}` } : null;
+  const from = isRemote(req) ? { from: `Tailscale ${clientIp(req)}${viaServe(req) ? ' (https)' : ''}` } : null;
   if (r.error) {
     if (r.user) db.audit(r.user, 'login.failed', { details: { error: r.error, ...from } });
     throw fail(401, r.error);
@@ -606,7 +676,11 @@ route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
     changed.ai = { enabled: next.enabled, model: next.model, transcribeModel: next.transcribeModel, keyChanged: !!a.key || !!a.clearKey };
   }
   db.audit(user, 'settings.update', { details: changed });
-  if ('remoteAccess' in changed) await syncRemote();
+  if ('remoteAccess' in changed) {
+    await syncRemote();
+    // The HTTPS address answers nothing while remote access is off; take it down too.
+    if (!changed.remoteAccess && (await httpsInfo()).on) { await tailscale.serve(false, PORT); httpsCache.at = 0; }
+  }
   return settingsPublic();
 });
 
@@ -664,7 +738,7 @@ route('POST', '/api/update/install', { admin: true }, ({ user }) => {
 
 // ---- static ----
 
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.png': 'image/png', '.webmanifest': 'application/manifest+json; charset=utf-8' };
 
 function serveStatic(pathname, res) {
   let rel;

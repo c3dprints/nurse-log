@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.7
+
+Easier phone setup.
+
+- HTTPS for phones: Settings > Remote access > Set up HTTPS (admin, on the office PC) turns on Tailscale Serve, which gives this PC an https://<name>.<tailnet>.ts.net:8943 address with a real certificate, visible only on your Tailscale. Port 443 is left free for other apps. If HTTPS certificates are off for the Tailscale account, the page links to where to switch them on. HTTPS goes off again when remote access is turned off.
+- Requests through that address are treated as phone requests (Tailscale devices only, same sign-in and auto sign-out, no Save as), and remote sign-ins over it are audited as "(https)". It needs no Windows Firewall rule.
+- Install as an app: a web app manifest, phone icons and a small service worker (nothing is cached; records stay on the PC). From the HTTPS address, Android Chrome offers Install app and iPhone Safari Add to Home Screen; it opens full screen with its own icon.
+- Dictation works on a phone over the HTTPS address, since phones allow the microphone there.
+- QR codes in Settings > Remote access: scan with the phone's camera instead of typing the address.
+
 ## 1.0.6
 
 - Settings > Help (for every user): how to use dictation with ChatGPT, with step-by-step use, example phrases for student, medication and visit forms, tips, one-time admin setup, privacy, phone use, and fixes for common messages. The Dictate bar has a "How to use" link, and Settings > Dictation & ChatGPT points to it.

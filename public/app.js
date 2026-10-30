@@ -1106,6 +1106,40 @@ function copyable(text) {
   } }, 'Copy'));
 }
 
+// A QR code drawn as SVG from the server's rows of 0/1.
+function qrSvg(rows, px = 180) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const n = rows.length + 8; // 4-module quiet zone each side
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${n} ${n}`);
+  svg.setAttribute('width', px);
+  svg.setAttribute('height', px);
+  svg.setAttribute('shape-rendering', 'crispEdges');
+  svg.setAttribute('role', 'img');
+  const bg = document.createElementNS(NS, 'rect');
+  bg.setAttribute('width', n);
+  bg.setAttribute('height', n);
+  bg.setAttribute('fill', '#fff');
+  let d = '';
+  rows.forEach((row, y) => { for (let x = 0; x < row.length; x++) if (row[x] === '1') d += `M${x + 4} ${y + 4}h1v1h-1z`; });
+  const path = document.createElementNS(NS, 'path');
+  path.setAttribute('d', d);
+  path.setAttribute('fill', '#000');
+  svg.append(bg, path);
+  return svg;
+}
+
+async function qrBox(url) {
+  const box = h('div', { class: 'qr' });
+  try {
+    const q = await get(`/api/remote/qr?${new URLSearchParams({ url })}`);
+    const svg = qrSvg(q.rows);
+    svg.setAttribute('aria-label', `QR code for ${url}`);
+    box.append(svg, h('div', { class: 'muted small' }, 'Scan with the phone\u2019s camera'));
+  } catch { box.remove(); }
+  return box;
+}
+
 async function setRemote(body, _d, reload) {
   const r = await get('/api/remote');
   const admin = S.user.role === 'admin';
@@ -1136,18 +1170,66 @@ async function setRemote(body, _d, reload) {
       admin ? h('label', { class: 'check', style: 'margin-top:16px' }, toggle, 'Let phones and other devices on my Tailscale open Nurse’s Log')
         : h('p', { class: 'muted small' }, 'An admin turns remote access on or off.'),
       h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn', onclick: reload }, 'Refresh'))),
-    on ? section('Open on your phone', h('p', { class: 'muted' }, 'Type one of these into the phone’s browser, then use "Add to Home Screen" so it opens like an app.'),
-      h('div', { style: 'display:grid;gap:8px' }, r.urls.map(copyable))) : null,
+    on ? await httpsSection(r, admin, reload) : null,
+    on ? section(r.https.on ? 'Plain address (works without installing)' : 'Open on your phone',
+      h('p', { class: 'muted' }, r.https.on
+        ? 'These also work, but phones will not install the app or allow dictation from them.'
+        : 'Scan the code with the phone\u2019s camera, or type one of these into the phone\u2019s browser.'),
+      h('div', { class: 'qr-row' },
+        !r.https.on && !S.remote && r.urls[0] ? await qrBox(r.urls[0]) : null,
+        h('div', { style: 'display:grid;gap:8px;flex:1;min-width:240px;align-content:start' }, r.urls.map(copyable)))) : null,
     section('Set up a phone',
       h('ol', { style: 'margin:0;padding-left:20px;line-height:1.8' },
         h('li', {}, 'Install Tailscale on this PC and on the phone, and sign both in to the same Tailscale account.'),
-        h('li', {}, 'Turn on remote access above (admin).'),
-        h('li', {}, 'On the phone, open the address shown above and sign in with your Nurse’s Log username and password.')),
+        h('li', {}, 'Turn on remote access above, then press Set up HTTPS (admin, once).'),
+        h('li', {}, 'On the phone, scan the QR code with the camera (or type the address) and sign in with your Nurse’s Log username and password.'),
+        h('li', {}, 'Install it: Android Chrome \u22EE menu > Install app (or Add to Home screen); iPhone Safari Share > Add to Home Screen. It then opens full screen from its own icon.')),
       h('p', { class: 'muted small' }, 'The connection is encrypted by Tailscale and only devices on your Tailscale can reach it; the school Wi-Fi cannot. The same password, lockout and auto sign-out apply, and every remote sign-in is in the audit log with the device’s address. "Save as" is not available from a phone; use Download.')),
     admin && on ? section('If the phone cannot connect',
-      h('p', { class: 'muted' }, 'Windows Firewall may block it. Allow it once by running this in PowerShell as administrator (it only lets Tailscale devices in, on this one port):'),
+      h('p', { class: 'muted' }, 'The HTTPS address goes through Tailscale itself and needs nothing else. For the plain address, Windows Firewall may block it. Allow it once by running this in PowerShell as administrator (it only lets Tailscale devices in, on this one port):'),
       copyable(FIREWALL_CMD)) : null,
   );
+}
+
+// The HTTPS address: what phones need to install the app and use the microphone.
+async function httpsSection(r, admin, reload) {
+  const err = errBox();
+  const flip = (on) => async (e) => {
+    e.target.disabled = true;
+    if (on) toast('Setting up HTTPS\u2026 this can take half a minute');
+    try {
+      const info = await post('/api/remote/https', { on });
+      if (on && !info.https.on) {
+        showErr(err, '');
+        err.replaceChildren('HTTPS certificates are off for your Tailscale account. Open ', h('a', { href: info.https.enableUrl, target: '_blank', rel: 'noopener' }, info.https.enableUrl),
+          ', sign in, and under HTTPS Certificates click Enable HTTPS. Then press Set up HTTPS again.');
+        e.target.disabled = false;
+        return;
+      }
+      toast(on ? 'HTTPS is ready' : 'HTTPS turned off');
+      reload();
+    } catch (x) { showErr(err, x.message); e.target.disabled = false; }
+  };
+  if (r.https.on) {
+    return section('Install on a phone (HTTPS)',
+      h('p', { class: 'muted' }, 'Use this address on phones. It has a real certificate from Tailscale, so the phone can install Nurse\u2019s Log as an app and use the microphone for dictation. Only devices on your Tailscale can open it.'),
+      h('div', { class: 'qr-row' },
+        S.remote ? null : await qrBox(r.https.url),
+        h('div', { style: 'flex:1;min-width:240px' }, copyable(r.https.url),
+          h('ol', { class: 'muted', style: 'padding-left:20px;line-height:1.7' },
+            h('li', {}, 'Scan the code with the phone\u2019s camera and open the link.'),
+            h('li', {}, 'Sign in.'),
+            h('li', {}, 'Android (Chrome): tap \u22EE then Install app. iPhone (Safari): tap Share then Add to Home Screen.')),
+          admin && !S.remote ? h('button', { class: 'btn small', onclick: flip(false) }, 'Turn off HTTPS') : null)),
+      err);
+  }
+  return section('Install on a phone (HTTPS)',
+    h('p', { class: 'muted' }, 'Phones only install apps and allow the microphone on secure (https) addresses. Tailscale can give this PC one, visible only on your Tailscale.'),
+    admin && !S.remote
+      ? h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: flip(true) }, 'Set up HTTPS'))
+      : h('p', { class: 'muted small' }, 'An admin sets this up once, on the office PC.'),
+    h('p', { class: 'muted small' }, 'Tailscale notes that turning on HTTPS certificates puts this PC\u2019s Tailscale name in public certificate logs. Nothing on it becomes reachable from the internet.'),
+    err);
 }
 
 function setAppearance(body) {
@@ -1364,7 +1446,7 @@ function setHelp(body) {
         h('li', {}, 'Check with your district before turning it on, as student health records fall under FERPA.'))),
 
     section('On a phone',
-      h('p', {}, 'Over the Tailscale address the Dictate button is hidden, because phones only allow the microphone on secure (https) pages. Use ', h('b', {}, 'Type notes'), ' and tap the microphone key on the phone\u2019s keyboard to speak; then press ', h('b', {}, 'Fill in the form'), '.')),
+      h('p', {}, 'Dictate works on a phone when Nurse\u2019s Log is opened from its HTTPS address (Settings > Remote access > Install on a phone). On the plain http address phones block the microphone, so the Dictate button is hidden; use ', h('b', {}, 'Type notes'), ' and tap the microphone key on the phone\u2019s keyboard to speak, then press ', h('b', {}, 'Fill in the form'), '.')),
 
     section('If something goes wrong',
       faq('There is no Dictate button',
@@ -1458,3 +1540,7 @@ async function waitForRestart() {
   }
   render();
 })();
+
+// On the phone's HTTPS address this is what lets the browser offer "Install app".
+// Plain http cannot run it; there "Add to Home Screen" still makes a shortcut.
+if (location.protocol === 'https:' && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
