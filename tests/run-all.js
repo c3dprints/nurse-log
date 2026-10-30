@@ -13,7 +13,8 @@ const { spawn } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const { Db } = require('../lib/db');
 const { Auth, hash, verify, checkPassword } = require('../lib/auth');
-const { Records, parseTimes } = require('../lib/records');
+const { Records, parseTimes, phone } = require('../lib/records');
+const ai = require('../lib/ai');
 const excel = require('../lib/excel');
 const updater = require('../lib/updater');
 
@@ -117,6 +118,41 @@ async function unit() {
     rec.setArchived(admin, s.id, false);
   });
 
+  await test('guardian phones: 10 digits, formatted', () => {
+    assert.strictEqual(phone('555.201.3344', 'Phone'), '(555) 201-3344');
+    assert.strictEqual(phone('+1 (555) 201-3344', 'Phone'), '(555) 201-3344');
+    assert.strictEqual(phone('', 'Phone'), null);
+    assert.throws(() => phone('555-201-33445', 'Guardian phone'), /Guardian phone must be 10 digits/);
+    assert.throws(() => phone('201-3344', 'Phone'), /10 digits/);
+    const s = rec.searchStudents({})[0];
+    assert.throws(() => rec.updateStudent(admin, s.id, { guardian_phone: '12345' }), /10 digits/);
+    assert.strictEqual(rec.updateStudent(admin, s.id, { guardian_phone: '5552013344', med_consent: 'On file', home_meds: 'Zyrtec 10 mg' }).guardian_phone, '(555) 201-3344');
+    assert.throws(() => rec.updateStudent(admin, s.id, { med_consent: 'Maybe' }), /permission/);
+  });
+
+  await test('older databases get the medication info columns', async () => {
+    const initSqlJs = require('sql.js');
+    const SQL = await initSqlJs();
+    const old = new SQL.Database();
+    old.exec('CREATE TABLE students (id INTEGER PRIMARY KEY, first_name TEXT NOT NULL, last_name TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)');
+    old.exec("INSERT INTO students(first_name, last_name, created_at, updated_at) VALUES('Old', 'Row', 1, 1)");
+    const dir = path.join(tmp, 'old');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'nurse-log.sqlite'), Buffer.from(old.export()));
+    const db2 = await Db.open(dir);
+    const cols = db2.all('PRAGMA table_info(students)').map((c) => c.name);
+    for (const c of ['home_meds', 'med_consent', 'pharmacy', 'med_notes']) assert(cols.includes(c), c);
+    assert.strictEqual(db2.get('SELECT first_name FROM students').first_name, 'Old');
+  });
+
+  await test('dictation schema: every field required, choices kept', () => {
+    const sc = ai.schemaFor([{ name: 'sex', label: 'Sex', type: 'select', choices: ['', 'F', 'M'] }, { name: 'prn', label: 'PRN', type: 'check', choices: [] }]);
+    assert.deepStrictEqual(sc.required, ['sex', 'prn']);
+    assert.deepStrictEqual(sc.properties.sex.enum, ['F', 'M', null]);
+    assert.deepStrictEqual(sc.properties.prn.type, ['boolean', 'null']);
+    assert.strictEqual(sc.additionalProperties, false);
+  });
+
   await test('database survives reopen and keeps a daily backup', async () => {
     const again = await Db.open(path.join(tmp, 'unit'));
     assert.strictEqual(again.get('SELECT COUNT(*) AS n FROM students').n, 1);
@@ -156,6 +192,34 @@ async function unit() {
 // ---- http -------------------------------------------------------------------------
 
 const PORT = 8941;
+const AI_PORT = 8942; // fake OpenAI API
+
+// Stands in for api.openai.com: checks the key, answers with fixed text and values.
+function fakeOpenAI() {
+  const seen = [];
+  const srv = http.createServer((rq, rs) => {
+    const chunks = [];
+    rq.on('data', (c) => chunks.push(c));
+    rq.on('end', () => {
+      const body = Buffer.concat(chunks);
+      seen.push({ url: rq.url, auth: rq.headers.authorization, body });
+      const out = (code, o) => { rs.writeHead(code, { 'Content-Type': 'application/json' }); rs.end(JSON.stringify(o)); };
+      if (rq.headers.authorization !== 'Bearer sk-test-key') return out(401, { error: { message: 'bad key' } });
+      if (rq.url === '/v1/models') return out(200, { data: [{ id: 'gpt-4o-mini' }, { id: 'gpt-4o-mini-transcribe' }] });
+      if (rq.url === '/v1/audio/transcriptions') return out(200, { text: 'Mom is Jane Smith five five five two zero one three three four four.' });
+      if (rq.url === '/v1/chat/completions') {
+        const j = JSON.parse(body.toString());
+        const v = Object.fromEntries(Object.keys(j.response_format.json_schema.schema.properties).map((k) => [k, null]));
+        Object.assign(v, { guardian_name: 'Jane Smith', guardian_phone: '5552013344', med_consent: 'On file', sex: 'Q' });
+        return out(200, { choices: [{ message: { content: JSON.stringify(v) } }] });
+      }
+      out(404, { error: { message: 'no' } });
+    });
+  });
+  srv.seen = seen;
+  return new Promise((resolve) => srv.listen(AI_PORT, '127.0.0.1', () => resolve(srv)));
+}
+
 const TS_IP = '127.0.0.2'; // stands in for this PC's Tailscale address
 let cookie = '';
 function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1' } = {}) {
@@ -192,9 +256,10 @@ async function httpTests() {
   const exportDir = path.join(tmp, 'exports');
   fs.mkdirSync(exportDir);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP },
+    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1` },
     stdio: 'ignore', windowsHide: true,
   });
+  const openai = await fakeOpenAI();
   try {
     for (let i = 0; i < 100; i++) {
       try { if ((await req('GET', '/api/ping')).json?.app === 'nurse-log') break; } catch { /* starting */ }
@@ -293,6 +358,42 @@ async function httpTests() {
       await req('POST', '/api/settings', { smtp: { host: '', port: 587, user: '', from: '', clearPass: true } });
     });
 
+    await test('http: dictation fills form values through ChatGPT, key never sent back', async () => {
+      const fields = [{ name: 'guardian_name', label: 'Parent / guardian' }, { name: 'guardian_phone', label: 'Guardian phone', type: 'tel' },
+        { name: 'med_consent', label: 'Permission', type: 'select', choices: ['', 'On file', 'Not on file'] }, { name: 'sex', label: 'Sex', type: 'select', choices: ['', 'F', 'M'] }];
+      assert.strictEqual((await req('GET', '/api/state')).json.aiReady, false);
+      assert.match((await req('POST', '/api/ai/fill', { notes: 'x', fields })).json.error, /not set up/);
+      assert.match((await req('POST', '/api/settings', { ai: { enabled: true } })).json.error, /API key/);
+      await req('POST', '/api/settings', { ai: { enabled: true, key: 'sk-test-key' } });
+      const st = (await req('GET', '/api/settings')).json.settings;
+      assert.strictEqual(st.ai.hasKey, true);
+      assert(!JSON.stringify(st).includes('sk-test-key'));
+      assert.strictEqual((await req('GET', '/api/state')).json.aiReady, true);
+      assert.strictEqual((await req('POST', '/api/settings/test-ai')).status, 200);
+
+      const typed = await req('POST', '/api/ai/fill', { notes: 'Mom is Jane Smith 555 201 3344, form on file', fields, form: 'Student info', studentId: sid });
+      assert.strictEqual(typed.status, 200, JSON.stringify(typed.json));
+      assert.deepStrictEqual(typed.json.values, { guardian_name: 'Jane Smith', guardian_phone: '5552013344', med_consent: 'On file' }, 'unknown choice "Q" is dropped');
+
+      const spoken = await req('POST', '/api/ai/fill', { audio: Buffer.alloc(4000, 7).toString('base64'), mime: 'audio/webm;codecs=opus', fields, studentId: sid });
+      assert.match(spoken.json.transcript, /Jane Smith/);
+      assert(openai.seen.some((x) => x.url === '/v1/audio/transcriptions' && x.body.includes('gpt-4o-mini-transcribe')));
+      assert(openai.seen.every((x) => x.auth === 'Bearer sk-test-key'));
+      const audit = (await req('GET', `/api/students/${sid}`)).json.history.filter((a) => a.action === 'ai.fill');
+      assert.strictEqual(audit.length, 2);
+      assert(!audit[0].details.includes('Jane'), 'audit lists field names, not what was said');
+
+      await req('POST', '/api/settings', { ai: { key: 'sk-wrong' } });
+      assert.match((await req('POST', '/api/ai/fill', { notes: 'x', fields })).json.error, /rejected the API key/);
+      await req('POST', '/api/settings', { ai: { enabled: false, clearKey: true } });
+      assert.strictEqual((await req('GET', '/api/settings')).json.settings.ai.hasKey, false);
+    });
+
+    await test('http: guardian phone over 10 digits is refused', async () => {
+      assert.match((await req('POST', `/api/students/${sid}`, { guardian_phone: '555201334455' })).json.error, /10 digits/);
+      assert.strictEqual((await req('POST', `/api/students/${sid}`, { guardian_phone: '555-201-3344' })).json.guardian_phone, '(555) 201-3344');
+    });
+
     await test('http: password reset with recovery code, email not set up', async () => {
       cookie = '';
       assert.strictEqual((await req('POST', '/api/reset/request', { login: 'admin' })).json.emailReady, false);
@@ -341,6 +442,7 @@ async function httpTests() {
     });
   } finally {
     child.kill();
+    openai.close();
   }
 }
 

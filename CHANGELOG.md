@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.4
+
+- Guardian and second contact phone numbers are capped at 10 digits and shown as (555) 123-4567 while you type. A leading 1 is dropped; anything else that is not 10 digits is refused.
+- Student record: new Medication info section with permission to give medication at school (On file / Not on file / Expired, with a warning on the board when it is not on file), pharmacy, medications taken at home, and medication notes. Included in Excel exports.
+- Dictation with ChatGPT: an admin adds an OpenAI API key in Settings > Dictation & ChatGPT. Student, medication and visit forms then get Dictate and Type notes buttons; ChatGPT fills in the matching boxes (highlighted) for the nurse to check before saving. Each use is in the audit log. Off until set up, with a privacy notice; the key never leaves this PC's server. Without it, forms show the Windows key + H dictation tip.
+
 ## 1.0.3
 
 - Remote access with Tailscale: Settings > Remote access shows this PC's Tailscale IP and name and the links to open on a phone. Off until an admin turns it on; it then listens only on the Tailscale address (never the school network) and only answers Tailscale devices. Remote sign-ins are audited with the device address. Save as and Browse are hidden on a phone (Download works instead).

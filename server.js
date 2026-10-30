@@ -18,6 +18,7 @@ const mailer = require('./lib/mailer');
 const dialogs = require('./lib/dialogs');
 const updater = require('./lib/updater');
 const tailscale = require('./lib/tailscale');
+const ai = require('./lib/ai');
 const pkg = require('./package.json');
 
 const APP = 'nurse-log';
@@ -28,6 +29,7 @@ const HOST = '127.0.0.1';
 const DATA_DIR = process.env.NL_DATA || path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'NurseLog');
 const PUBLIC = path.join(APP_DIR, 'public');
 const MAX_BODY = 2 * 1024 * 1024;
+const MAX_AUDIO_BODY = 16 * 1024 * 1024; // a few minutes of dictation, base64
 const COOKIE = 'nl_session';
 const NO_DIALOGS = process.env.NL_NO_DIALOGS === '1'; // tests
 
@@ -284,16 +286,16 @@ function send(res, code, body, type = 'application/json; charset=utf-8', extra =
   res.end(data);
 }
 
-function readBody(req) {
+function readBody(req, max = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
-      if (size <= MAX_BODY) chunks.push(c);
+      if (size <= max) chunks.push(c);
     });
     req.on('end', () => {
-      if (size > MAX_BODY) return reject(fail(413, 'body too large'));
+      if (size > max) return reject(fail(413, 'body too large'));
       if (!chunks.length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { reject(fail(400, 'bad json')); }
     });
@@ -309,14 +311,18 @@ function cookieToken(req) {
 const setCookie = (token) => ({ 'Set-Cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/` });
 const clearCookie = { 'Set-Cookie': `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` };
 
+const aiSettings = () => ({ enabled: false, key: '', ...ai.DEFAULTS, ...(db.setting('ai', {}) || {}) });
+
 function settingsPublic() {
   const s = db.setting('smtp', {}) || {};
+  const a = aiSettings();
   return {
     schoolName: db.setting('schoolName', ''),
     idleMinutes: db.setting('idleMinutes', 15),
     exportFolder: db.setting('exportFolder', ''),
     autoUpdate: db.setting('autoUpdate', false),
     smtp: { host: s.host || '', port: s.port || 587, user: s.user || '', from: s.from || '', hasPass: !!s.pass },
+    ai: { enabled: !!a.enabled, model: a.model, transcribeModel: a.transcribeModel, hasKey: !!a.key },
     dataDir: DATA_DIR,
   };
 }
@@ -343,6 +349,7 @@ route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   exportFolder: user ? db.setting('exportFolder', '') : '',
   theme: user ? db.setting(`theme:${user.id}`, 'system') : null,
   remote: isRemote(req),
+  aiReady: user ? ai.configured(aiSettings()) : false,
 }));
 
 // Where to open the app from a phone. Any signed-in user can see it; only an admin can switch it on.
@@ -583,6 +590,20 @@ route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
     db.setSetting('smtp', next);
     changed.smtp = { host: next.host, port: next.port, user: next.user, from: next.from, passChanged: !!s.pass || !!s.clearPass };
   }
+  if (body.ai) {
+    const old = aiSettings();
+    const a = body.ai;
+    const model = (v, d) => String(v || '').trim().replace(/[^\w.:-]/g, '').slice(0, 80) || d;
+    const next = {
+      enabled: 'enabled' in a ? !!a.enabled : old.enabled,
+      key: a.key ? String(a.key).trim() : a.clearKey ? '' : old.key,
+      model: model(a.model ?? old.model, ai.DEFAULTS.model),
+      transcribeModel: model(a.transcribeModel ?? old.transcribeModel, ai.DEFAULTS.transcribeModel),
+    };
+    if (next.enabled && !next.key) throw fail(400, 'add an OpenAI API key before turning the assistant on');
+    db.setSetting('ai', next);
+    changed.ai = { enabled: next.enabled, model: next.model, transcribeModel: next.transcribeModel, keyChanged: !!a.key || !!a.clearKey };
+  }
   db.audit(user, 'settings.update', { details: changed });
   if ('remoteAccess' in changed) await syncRemote();
   return settingsPublic();
@@ -596,6 +617,35 @@ route('POST', '/api/settings/test-email', { admin: true }, async ({ user }) => {
   }
   db.audit(user, 'settings.test-email', { details: user.email });
   return { sentTo: user.email };
+});
+
+route('POST', '/api/settings/test-ai', { admin: true }, async ({ user }) => {
+  const a = aiSettings();
+  if (!a.key) throw fail(400, 'add an OpenAI API key first');
+  const r = await ai.test(a);
+  db.audit(user, 'settings.test-ai', { details: r });
+  if (!r.ok) throw fail(400, `the key works, but this account cannot use: ${r.missing.join(', ')}`);
+  return r;
+});
+
+// Dictation: audio (base64) and/or typed notes in, suggested form values out.
+// Nothing is saved; the nurse checks the form and saves it as usual.
+route('POST', '/api/ai/fill', { maxBody: MAX_AUDIO_BODY }, async ({ body, user, req }) => {
+  const a = aiSettings();
+  if (!ai.configured(a)) throw fail(400, 'the dictation assistant is not set up; an admin can turn it on in Settings > Dictation & ChatGPT');
+  let transcript = '';
+  if (body.audio) {
+    const buf = Buffer.from(String(body.audio), 'base64');
+    if (buf.length < 1000) throw fail(400, 'that recording was too short');
+    const mime = /^audio\/(webm|ogg|mp4|mpeg|wav)/.test(body.mime || '') ? body.mime.split(';')[0] : 'audio/webm';
+    transcript = await ai.transcribe(a, buf, mime);
+  }
+  const notes = [String(body.notes || '').trim(), transcript].filter(Boolean).join('\n').slice(0, 20000);
+  if (!notes) throw fail(400, 'nothing was heard; try again a little closer to the microphone');
+  const studentId = Number(body.studentId) || null;
+  const values = await ai.fill(a, { notes, fields: body.fields, current: body.current || {}, form: String(body.form || 'form').slice(0, 60), today: localDate(Date.now()) });
+  db.audit(user, 'ai.fill', { studentId, details: { form: body.form || null, spoken: !!body.audio, typed: !!body.notes, filled: Object.keys(values), model: a.model, ...(isRemote(req) ? { from: 'Tailscale' } : {}) } });
+  return { transcript, values };
 });
 
 route('POST', '/api/settings/pick-folder', { admin: true }, async ({ req }) => {
@@ -643,7 +693,7 @@ async function handle(req, res) {
       if (user.must_change && !r.allowMustChange) throw fail(403, 'change your password first');
       if (r.admin && user.role !== 'admin') throw fail(403, 'admins only');
     }
-    const body = req.method === 'POST' ? await readBody(req) : {};
+    const body = req.method === 'POST' ? await readBody(req, r.maxBody) : {};
     const out = await r.fn({ body, query: Object.fromEntries(url.searchParams), params, user, token, res, req });
     if (res.fileDownload) {
       const { buf, name } = res.fileDownload;

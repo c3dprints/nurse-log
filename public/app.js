@@ -212,13 +212,27 @@ async function doExport(kind, params, target) {
   }
 }
 
-// fields: [name, label, type, opts]; type: text|email|password|date|number|textarea|select|check|datetime
+// US phone: digits only, at most 10, shown as (555) 123-4567 while typing.
+function fmtPhone(v) {
+  let d = String(v || '').replace(/\D/g, '');
+  if (d.length === 11 && d[0] === '1') d = d.slice(1);
+  d = d.slice(0, 10);
+  if (d.length < 4) return d;
+  if (d.length < 7) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+// fields: [name, label, type, opts]; type: text|email|password|date|number|textarea|select|check|datetime|tel|heading
 function formGrid(fields, values = {}) {
   const form = h('form', { class: 'grid', onsubmit: (e) => e.preventDefault() });
   for (const [name, label, type = 'text', opts = {}] of fields) {
     let input;
     const v = values[name];
-    if (type === 'textarea') input = h('textarea', { name, rows: opts.rows || 3 });
+    if (type === 'heading') { form.append(h('h3', { class: 'wide formhead' }, label)); continue; }
+    if (type === 'tel') {
+      input = h('input', { type: 'tel', name, value: fmtPhone(v), inputmode: 'numeric', autocomplete: 'off', maxlength: 14, placeholder: '(555) 123-4567' });
+      input.addEventListener('input', () => { input.value = fmtPhone(input.value); });
+    } else if (type === 'textarea') input = h('textarea', { name, rows: opts.rows || 3 });
     else if (type === 'select') input = h('select', { name }, (opts.choices || []).map((c) => h('option', { value: c, selected: (v ?? opts.default ?? '') === c }, c || '\u2014')));
     else if (type === 'check') {
       form.append(h('div', { class: opts.wide ? 'wide' : null }, h('label', { class: 'check' }, h('input', { type: 'checkbox', name, checked: !!v }), label)));
@@ -261,7 +275,7 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 
 // ---- app state and routing ------------------------------------------------------
 
-const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false };
+const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false };
 const $app = document.getElementById('app');
 
 // [key, name, kind, swatch colors: background, panel, accent]
@@ -289,7 +303,7 @@ async function loadState() {
   if (st.theme) applyTheme(st.theme);
   Object.assign(S, {
     user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady,
-    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote,
+    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady,
   });
 }
 
@@ -612,20 +626,25 @@ const STUDENT_FORM = [
   ['homeroom', 'Homeroom / teacher'],
   ['sex', 'Sex', 'select', { choices: ['', 'F', 'M', 'X'] }],
   ['guardian_name', 'Parent / guardian'],
-  ['guardian_phone', 'Guardian phone'],
+  ['guardian_phone', 'Guardian phone', 'tel'],
   ['guardian2_name', 'Second contact'],
-  ['guardian2_phone', 'Second contact phone'],
+  ['guardian2_phone', 'Second contact phone', 'tel'],
   ['physician', 'Physician'],
   ['physician_phone', 'Physician phone'],
   ['allergies', 'Allergies', 'textarea', { rows: 2 }],
   ['conditions', 'Health conditions (asthma, diabetes, seizures\u2026)', 'textarea', { rows: 2 }],
   ['notes', 'Notes / care plan', 'textarea'],
+  ['', 'Medication info', 'heading'],
+  ['med_consent', 'Permission to give medication at school', 'select', { choices: ['', 'On file', 'Not on file', 'Expired'] }],
+  ['pharmacy', 'Pharmacy'],
+  ['home_meds', 'Medications taken at home', 'textarea', { rows: 2 }],
+  ['med_notes', 'Medication notes (reactions, how the student takes them, refills\u2026)', 'textarea', { rows: 2 }],
 ];
 
 function studentForm(s, reload) {
   const form = formGrid(STUDENT_FORM, s || {});
   const err = errBox();
-  const m = modal(s ? `Edit ${s.first_name} ${s.last_name}` : 'Add student', [err, form], [
+  const m = modal(s ? `Edit ${s.first_name} ${s.last_name}` : 'Add student', [assistBar(form, STUDENT_FORM, { form: 'Student info', studentId: s?.id }), err, form], [
     ['Cancel', () => m.close()],
     [s ? 'Save changes' : 'Add student', async () => {
       try {
@@ -693,8 +712,13 @@ async function viewStudent(main, r) {
       body));
 
   if (tab === 'info') {
-    body.append(h('dl', { class: 'kv' }, STUDENT_FORM.flatMap(([k, label]) => [h('dt', {}, label), h('dd', {}, s[k] || '\u2014')]),
+    const cut = STUDENT_FORM.findIndex((f) => f[2] === 'heading');
+    const kv = (fields) => fields.flatMap(([k, label]) => [h('dt', {}, label), h('dd', {}, s[k] || '\u2014')]);
+    body.append(h('dl', { class: 'kv' }, kv(STUDENT_FORM.slice(0, cut)),
       h('dt', {}, 'Added'), h('dd', {}, fmtDT(s.created_at)), h('dt', {}, 'Last changed'), h('dd', {}, fmtDT(s.updated_at))),
+    h('h3', { class: 'formhead' }, STUDENT_FORM[cut][1]),
+    s.med_consent && s.med_consent !== 'On file' ? h('div', { class: 'alert warn' }, `Medication permission: ${s.med_consent}`) : null,
+    h('dl', { class: 'kv' }, kv(STUDENT_FORM.slice(cut + 1))),
     h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn', onclick: () => studentForm(s, reload) }, 'Edit info')));
   } else if (tab === 'meds') {
     body.append(
@@ -775,7 +799,7 @@ function prettyDetails(d) {
 }
 
 function medForm(s, m, reload) {
-  const form = formGrid([
+  const fields = [
     ['name', 'Medication', 'text', { required: true }],
     ['dose', 'Dose (e.g. 5 mg, 2 puffs)'],
     ['route', 'Route', 'select', { choices: ROUTES }],
@@ -787,9 +811,10 @@ function medForm(s, m, reload) {
     ['on_hand', 'Doses on hand', 'number', { min: 0 }],
     ['instructions', 'Instructions', 'textarea', { rows: 2 }],
     ['active', 'Active (uncheck when stopped)', 'check'],
-  ], m ? { ...m, times: m.times ? m.times.split(', ').map((t) => t.replace(/^0/, '')).join(', ') : '' } : { active: 1 });
+  ];
+  const form = formGrid(fields, m ? { ...m, times: m.times ? m.times.split(', ').map((t) => t.replace(/^0/, '')).join(', ') : '' } : { active: 1 });
   const err = errBox();
-  const dlg = modal(m ? `Edit ${m.name}` : `Add medication for ${s.first_name} ${s.last_name}`, [err, form], [
+  const dlg = modal(m ? `Edit ${m.name}` : `Add medication for ${s.first_name} ${s.last_name}`, [assistBar(form, fields, { form: 'Medication', studentId: s.id }), err, form], [
     ['Cancel', () => dlg.close()],
     ['Save', async () => {
       try {
@@ -833,7 +858,7 @@ function giveForm(m, time, reload) {
 const COMPLAINTS = ['Headache', 'Stomach ache', 'Fever', 'Injury', 'Nausea', 'Sore throat', 'Asthma', 'Nosebleed', 'Medication', 'Blood sugar check', 'Rash', 'Dizziness', 'Toothache', 'Earache'];
 
 function visitForm(s, v, reload) {
-  const form = formGrid([
+  const fields = [
     ['visit_at', 'Time in', 'datetime'],
     ['complaint', 'Reason for visit', 'text', { required: true, list: 'complaints' }],
     ['temp', 'Temperature'],
@@ -842,14 +867,15 @@ function visitForm(s, v, reload) {
     ['disposition', 'Outcome', 'select', { choices: DISPOSITIONS }],
     ['parent_contacted', 'Parent / guardian contacted', 'check'],
     ['notes', 'Notes', 'textarea', { rows: 2 }],
-  ], v || { visit_at: Date.now() });
+  ];
+  const form = formGrid(fields, v || { visit_at: Date.now() });
   form.append(h('datalist', { id: 'complaints' }, COMPLAINTS.map((c) => h('option', { value: c }))));
   const err = errBox();
   const dlg = modal(v ? `Visit on ${fmtDT(v.visit_at)}` : `New visit: ${s.first_name} ${s.last_name}`, [
     s.allergies ? h('div', { class: 'alert bad' }, h('b', {}, 'Allergies: '), s.allergies) : null,
     s.conditions ? h('div', { class: 'alert warn' }, h('b', {}, 'Conditions: '), s.conditions) : null,
     s.guardian_name || s.guardian_phone ? h('p', { class: 'muted' }, `Guardian: ${s.guardian_name || ''} ${s.guardian_phone || ''}`) : null,
-    err, form,
+    assistBar(form, fields, { form: 'Office visit', studentId: s.id }), err, form,
   ], [
     ['Cancel', () => dlg.close()],
     ['Save visit', async () => {
@@ -897,11 +923,118 @@ const viewVisitLog = (main) => logView(main, {
 const viewGivenLog = (main) => logView(main, { title: 'Medication log', kind: 'given', url: '/api/given', cols: givenCols(true), onRow: (g) => go(`#/student/${g.student_id}/medlog`) });
 const viewAudit = (main) => logView(main, { title: 'Audit log', kind: 'audit', url: '/api/audit', cols: (rows) => auditTable(rows), days: 1 });
 
+// ---- dictation ---------------------------------------------------------------------
+
+const MAX_RECORD_SECONDS = 180;
+
+// The Dictate bar above a form: record or type notes, ChatGPT fills the boxes.
+// fields is the same list given to formGrid; values land in the form for the
+// nurse to check, nothing is saved here.
+function assistBar(form, fields, { form: formName, studentId } = {}) {
+  if (!S.aiReady) {
+    return h('p', { class: 'muted small assist-tip' }, S.remote
+      ? 'Tip: use the microphone key on your keyboard to dictate into any box.'
+      : 'Tip: press the Windows key + H to dictate into any box.',
+    S.user.role === 'admin' && !S.remote ? [' ', h('a', { href: '#/settings/ai' }, 'Set up ChatGPT to fill in the form for you.')] : null);
+  }
+  const list = fields.filter(([name, , type]) => name && type !== 'datetime' && type !== 'heading' && type !== 'password')
+    .map(([name, label, type = 'text', opts = {}]) => ({ name, label, type, choices: opts.choices || [] }));
+  const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  const status = h('span', { class: 'muted small', role: 'status' });
+  const heard = h('details', { class: 'assist-heard hidden' }, h('summary', {}, 'What was heard'), h('p', {}));
+  const notes = h('textarea', { rows: 3, placeholder: 'Type or paste notes, e.g. "Mom is Jane Smith, 555 201 3344. Takes Zyrtec 10 mg at home. Permission form is on file."' });
+  const typed = h('div', { class: 'hidden', style: 'margin-top:8px' }, notes,
+    h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'btn small primary', type: 'button', onclick: () => send({ notes: notes.value }) }, 'Fill in the form')));
+  let rec = null;
+  let timer = null;
+  const mic = h('button', { class: 'btn small primary', type: 'button', onclick: () => (rec ? rec.stop() : start()) }, '\u{1F3A4} Dictate');
+  const busy = (on) => { mic.disabled = on; for (const b of typed.querySelectorAll('button')) b.disabled = on; };
+
+  async function start() {
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {
+      status.textContent = 'The microphone is blocked or missing. Allow it for this app, or type your notes instead.';
+      return;
+    }
+    const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    const chunks = [];
+    rec = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      clearInterval(timer);
+      stream.getTracks().forEach((t) => t.stop());
+      const type = rec.mimeType || mime || 'audio/webm';
+      rec = null;
+      mic.textContent = '\u{1F3A4} Dictate';
+      mic.classList.remove('danger');
+      const blob = new Blob(chunks, { type });
+      const audio = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1] || ''); r.readAsDataURL(blob); });
+      send({ audio, mime: type, notes: notes.value });
+    };
+    rec.start(1000);
+    const began = Date.now();
+    mic.textContent = '\u25A0 Stop';
+    mic.classList.add('danger');
+    status.textContent = 'Listening\u2026 speak naturally, then press Stop.';
+    timer = setInterval(() => {
+      const sec = Math.round((Date.now() - began) / 1000);
+      status.textContent = `Listening\u2026 ${Math.floor(sec / 60)}:${p2(sec % 60)}`;
+      if (sec >= MAX_RECORD_SECONDS && rec) rec.stop();
+    }, 500);
+  }
+
+  async function send(payload) {
+    if (!payload.audio && !String(payload.notes || '').trim()) { status.textContent = 'Type some notes first.'; return; }
+    busy(true);
+    status.textContent = payload.audio ? 'Turning speech into text and filling in\u2026' : 'Filling in\u2026';
+    try {
+      const r = await post('/api/ai/fill', { ...payload, fields: list, current: readForm(form), form: formName, studentId });
+      const n = applyValues(form, list, r.values);
+      if (r.transcript) { heard.querySelector('p').textContent = r.transcript; heard.classList.remove('hidden'); }
+      status.textContent = n ? `Filled in ${n} box${n === 1 ? '' : 'es'} (highlighted). Check them before saving.` : 'Nothing in the notes matched this form.';
+      if (n && !payload.audio) notes.value = '';
+    } catch (e) {
+      status.textContent = e.message;
+    } finally { busy(false); }
+  }
+
+  return h('div', { class: 'assist' },
+    h('div', { class: 'row' }, canRecord ? mic : null,
+      h('button', { class: 'btn small', type: 'button', onclick: () => typed.classList.toggle('hidden') }, 'Type notes'),
+      status),
+    typed, heard);
+}
+
+// Puts suggested values into the form and highlights them. A note added to a
+// box that already has text is appended, so nothing typed earlier is lost.
+function applyValues(form, list, values) {
+  let n = 0;
+  for (const f of list) {
+    if (!(f.name in values)) continue;
+    const el = form.elements[f.name];
+    if (!el) continue;
+    let v = values[f.name];
+    if (f.type === 'check') { if (el.checked === !!v) continue; el.checked = !!v; } else {
+      if (f.type === 'tel') v = fmtPhone(v);
+      if (f.type === 'select' && ![...el.options].some((o) => o.value === v)) continue;
+      if (f.type === 'number' && !Number.isFinite(Number(v))) continue;
+      const old = el.value.trim();
+      if (f.type === 'textarea' && old && !v.includes(old)) v = `${old}\n${v}`;
+      if (el.value === v) continue;
+      el.value = v;
+    }
+    const box = el.closest('div');
+    if (box) box.classList.add('ai-filled');
+    n++;
+  }
+  return n;
+}
+
 // ---- settings ----------------------------------------------------------------------
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -912,7 +1045,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -1110,6 +1243,48 @@ function setEmail(body, d, reload) {
       h('button', { class: 'btn', onclick: async () => {
         try { toast('Sending\u2026'); const r = await post('/api/settings/test-email'); toast(`Test email sent to ${r.sentTo}`); } catch (e) { showErr(err, e.message); }
       } }, 'Send me a test email'))));
+}
+
+function setAi(body, d, reload) {
+  const err = errBox();
+  const a = d.settings.ai;
+  const form = formGrid([
+    ['enabled', 'Turn on the dictation assistant for everyone', 'check', { wide: true }],
+    ['key', a.hasKey ? 'OpenAI API key (saved; paste a new one to replace)' : 'OpenAI API key (starts with sk-)', 'password', { autocomplete: 'new-password', wide: true }],
+    ['model', 'Model that fills in the form'],
+    ['transcribeModel', 'Model that turns speech into text'],
+  ], { ...a, key: '' });
+  body.append(
+    section('Dictation & ChatGPT',
+      h('p', { class: 'muted' }, 'With this on, student, medication and visit forms get a Dictate button. Speak (or type) your notes, and ChatGPT fills in the matching boxes. Nothing is saved until you check the form and press Save, and every use is in the audit log.'),
+      h('div', { class: 'alert warn' }, h('b', {}, 'Student health information leaves this PC. '),
+        'What you say and the form\u2019s contents are sent to OpenAI to be read. Check your district\u2019s privacy rules (FERPA, and HIPAA if it applies) and use an OpenAI account your district approves. OpenAI does not train on API data by default.'),
+      a.enabled ? h('div', { class: 'alert ok' }, 'The assistant is on.') : null,
+      err, form,
+      h('div', { class: 'row', style: 'margin-top:10px' },
+        h('button', { class: 'btn primary', onclick: async () => {
+          try {
+            const s = await post('/api/settings', { ai: readForm(form) });
+            S.aiReady = s.ai.enabled && s.ai.hasKey;
+            toast('Saved');
+            reload();
+          } catch (e) { showErr(err, e.message); }
+        } }, 'Save'),
+        h('button', { class: 'btn', onclick: async () => {
+          try { toast('Checking\u2026'); await post('/api/settings/test-ai'); toast('The key works and both models are available'); } catch (e) { showErr(err, e.message); }
+        } }, 'Test the key'),
+        a.hasKey ? h('button', { class: 'btn', onclick: async () => {
+          if (!(await confirmBox('Remove the API key?', 'The assistant will turn off until a new key is added.', 'Remove', true))) return;
+          try { await post('/api/settings', { ai: { enabled: false, clearKey: true } }); S.aiReady = false; toast('Key removed'); reload(); } catch (e) { showErr(err, e.message); }
+        } }, 'Remove key') : null)),
+    section('Getting a key',
+      h('ol', {},
+        h('li', {}, 'Sign in at platform.openai.com. This is an API account; a ChatGPT Plus subscription is separate and does not include API use.'),
+        h('li', {}, 'Add a payment method or credits under Billing. Filling in a form costs a fraction of a cent.'),
+        h('li', {}, 'Open API keys, create a key, paste it above, then press Test the key.')),
+      h('p', { class: 'muted small' }, 'The key is stored on this PC only and is never sent to the app window or to phones.')),
+    section('Without ChatGPT',
+      h('p', { class: 'muted' }, 'Windows has free dictation built in: click in any box and press the Windows key + H. On a phone, use the microphone key on the keyboard.')));
 }
 
 function setSaving(body, d, reload) {
