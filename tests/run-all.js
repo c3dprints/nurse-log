@@ -637,17 +637,18 @@ async function httpTests() {
   }
 }
 
-// The mail relay (relay/worker.mjs) on its own, then end to end: an app server with
+// The mail relay (relay/.../nurse-log-mail/mail.mjs) on its own, then end to end: an app server with
 // NL_MAIL_RELAY -> a local server running the real worker code -> a fake Resend.
 const RELAY_PORT = 8943;
 const MAIL_PORT = 8944;
 async function relayTests() {
-  const { handle } = await import('../relay/worker.mjs');
+  const { handle } = await import('../relay/supabase/functions/nurse-log-mail/mail.mjs');
   const sent = [];
   const fakeResend = async (url, opt) => { sent.push({ url, auth: opt.headers.Authorization, ...JSON.parse(opt.body) }); return new Response('{"id":"x"}', { status: 200 }); };
   let limitOk = true;
-  const env = { RESEND_KEY: 'test-key', FROM: "Nurse's Log <hi@c3dprints.com>", FEEDBACK_TO: 'hi@c3dprints.com', LIMIT: { limit: async () => ({ success: limitOk }) } };
-  const call = (body, headers = { 'X-Nurse-Log': '1' }, path = '/send') => handle(new Request(`https://relay.test${path}`, { method: 'POST', headers, body: JSON.stringify(body) }), env, fakeResend);
+  const recorded = [];
+  const env = { RESEND_KEY: 'test-key', FROM: "Nurse's Log <hi@c3dprints.com>", FEEDBACK_TO: 'hi@c3dprints.com', allow: async () => limitOk, record: async (m) => { recorded.push(m.kind); } };
+  const call = (body, headers = { 'X-Nurse-Log': '1' }) => handle(new Request('https://relay.test/functions/v1/nurse-log-mail', { method: 'POST', headers, body: JSON.stringify(body) }), env, fakeResend);
 
   await test('relay: feedback only ever goes to the developer, resets carry only a code', async () => {
     let r = await call({ kind: 'feedback', text: 'Love it', name: 'Ada', email: 'ada@example.org', school: 'Test School', version: '1.0.15', to: 'victim@example.org' });
@@ -667,11 +668,11 @@ async function relayTests() {
     assert.strictEqual((await call({ kind: 'reset', to: 'a@b.c, d@e.org', code: '123456' })).status, 400);
     assert.strictEqual((await call({ kind: 'anything', to: 'x@example.org', text: 'hi' })).status, 400);
     assert.strictEqual((await call({ kind: 'feedback', text: 'hi' }, {})).status, 403, 'needs the header');
-    assert.strictEqual((await call({ kind: 'feedback', text: 'hi' }, undefined, '/other')).status, 404);
     limitOk = false;
     assert.strictEqual((await call({ kind: 'feedback', text: 'hi' })).status, 429);
     limitOk = true;
     assert.strictEqual(sent.length, 0);
+    assert.deepStrictEqual(recorded.splice(0), ['feedback', 'reset'], 'only sent mail is counted');
   });
 
   const relaySrv = http.createServer(async (q, s) => {
