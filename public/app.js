@@ -315,6 +315,79 @@ function applyTheme(theme) {
   try { localStorage.setItem('nl.theme', found[0]); localStorage.setItem('nl.style', style); } catch { /* storage blocked */ }
 }
 
+// Text size for this PC (screens differ, so it is not part of the account): CSS zoom
+// on <html>, kept in localStorage and put back by theme.js before the first paint.
+// Phones skip it and use pinch zoom.
+const ZOOMS = [0.9, 1, 1.1, 1.25, 1.4, 1.6, 1.8];
+const isPhone = () => matchMedia('(max-width: 760px)').matches;
+const pct = (z) => `${Math.round(z * 100)}%`;
+
+function getZoom() {
+  try { const z = Number(localStorage.getItem('nl.zoom')); return ZOOMS.includes(z) ? z : 1; } catch { return 1; }
+}
+
+function setZoom(z) {
+  if (!ZOOMS.includes(z)) z = 1;
+  try { localStorage.setItem('nl.zoom', String(z)); } catch { /* storage off */ }
+  document.documentElement.style.zoom = isPhone() || z === 1 ? '' : String(z);
+  for (const el of document.querySelectorAll('.zoom-now')) el.textContent = pct(z);
+  // Bigger text needs a bigger window: grow the app window to its usual size times the zoom,
+  // within the screen. Never shrinks it and leaves a maximized window alone.
+  const w = Math.min(screen.availWidth, Math.round(1180 * z)), ht = Math.min(screen.availHeight, Math.round(860 * z));
+  if (!isPhone() && window.outerWidth < screen.availWidth - 16 && (window.outerWidth < w || window.outerHeight < ht)) {
+    try {
+      window.resizeTo(Math.max(w, window.outerWidth), Math.max(ht, window.outerHeight));
+      const left = screen.availLeft || 0, top = screen.availTop || 0;
+      window.moveTo(Math.max(left, Math.min(window.screenX, left + screen.availWidth - window.outerWidth)), Math.max(top, Math.min(window.screenY, top + screen.availHeight - window.outerHeight)));
+    } catch { /* a normal browser tab cannot be resized */ }
+  }
+  return z;
+}
+
+function stepZoom(d) {
+  const i = ZOOMS.indexOf(getZoom());
+  return setZoom(ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, i + d))]);
+}
+
+function zoomControl() {
+  return h('div', { class: 'zoom-ctl' },
+    h('button', { class: 'btn', type: 'button', title: 'Smaller (Ctrl + minus)', 'aria-label': 'Smaller text', onclick: () => stepZoom(-1) }, 'A−'),
+    h('b', { class: 'zoom-now', 'aria-live': 'polite' }, pct(getZoom())),
+    h('button', { class: 'btn', type: 'button', title: 'Bigger (Ctrl + plus)', 'aria-label': 'Bigger text', onclick: () => stepZoom(1) }, 'A+'),
+    h('button', { class: 'btn small', type: 'button', title: 'Back to 100% (Ctrl + 0)', onclick: () => setZoom(1) }, 'Reset'));
+}
+
+// Ctrl + plus / minus / 0 and Ctrl + mouse wheel change the app's own text size, so it is
+// remembered and matches Settings (instead of Edge's separate page zoom).
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || isPhone()) return;
+  const d = e.key === '=' || e.key === '+' ? 1 : e.key === '-' || e.key === '_' ? -1 : e.key === '0' ? 0 : null;
+  if (d == null) return;
+  e.preventDefault();
+  toast(`Text size ${pct(d ? stepZoom(d) : setZoom(1))}`);
+});
+let wheelAt = 0;
+document.addEventListener('wheel', (e) => {
+  if (!e.ctrlKey || isPhone()) return;
+  e.preventDefault();
+  if (Date.now() - wheelAt < 200) return;
+  wheelAt = Date.now();
+  stepZoom(e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
+
+// First open on a PC: the window starts small, so offer bigger text right away
+// instead of leaving it in Settings. Done remembers the choice and never asks again.
+function offerZoom() {
+  if (isPhone()) return;
+  try { if (localStorage.getItem('nl.zoom') != null) return; } catch { return; }
+  const card = h('div', { class: 'zoom-offer', role: 'dialog', 'aria-label': 'Text size' },
+    h('b', {}, 'Is the text too small?'),
+    h('p', { class: 'muted small' }, 'Make everything bigger on this PC. You can change it any time in Settings > Appearance, or with Ctrl + plus and Ctrl + minus.'),
+    zoomControl(),
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', onclick: () => { setZoom(getZoom()); card.remove(); } }, 'Done')));
+  document.body.append(card);
+}
+
 async function loadState() {
   const st = await api('GET', '/api/state', null, { noReauth: true });
   if (st.theme) applyTheme(st.theme);
@@ -1525,6 +1598,10 @@ function setAppearance(body) {
   h('div', { class: 'name' }, name, h('small', {}, kind))));
   const group = (style) => cards.filter((c, i) => (THEMES[i][4] || 'classic') === style);
   body.append(
+    section('Text size',
+      isPhone()
+        ? h('p', { class: 'muted' }, 'On a phone, pinch with two fingers to zoom in.')
+        : [h('p', { class: 'muted' }, 'Make everything in Nurse’s Log bigger or smaller on this PC. Shortcuts: Ctrl + plus, Ctrl + minus, Ctrl + 0, or hold Ctrl and turn the mouse wheel.'), zoomControl()]),
     section('Theme',
       h('p', { class: 'muted' }, 'Pick the colors for your account. Your choice follows you to any PC you sign in on.'),
       h('div', { class: 'themes' }, group('classic'))),
@@ -1848,6 +1925,7 @@ async function waitForRestart() {
     return;
   }
   render();
+  offerZoom();
 })();
 
 // On the phone's HTTPS address this is what lets the browser offer "Install app".

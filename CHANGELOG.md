@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.13
+
+- Text size: the first time Nurse's Log opens on a PC, a small card asks "Is the text too small?" with A- / A+ buttons to make everything bigger, and the window grows to fit. Change it any time in Settings > Appearance > Text size, or with Ctrl + plus, Ctrl + minus, Ctrl + 0 or Ctrl + mouse wheel. The size is remembered on each PC (phones keep pinch zoom).
+
 ## 1.0.12
 
 - Windows installer: NursesLog-Setup-1.0.12.exe installs Nurse's Log for the signed-in user with no admin rights, Git or Node.js (it carries its own Node.js), and adds Desktop and Start menu shortcuts. Uninstall from Windows Settings > Apps; student records are kept.
