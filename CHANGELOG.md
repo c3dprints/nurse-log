@@ -2,7 +2,15 @@
 
 ## 1.0.11
 
-- 
+- Settings > About (everyone): version, a notice that this is beta software for evaluation and testing only, needing further testing, a security review and proper licensing before use with real student records, and the license.
+- Proprietary license (LICENSE): all rights reserved; copying, modifying, redistributing or reverse engineering without written permission is not allowed.
+- Security fixes from a review:
+  - Over the HTTPS address the sign-in and phone cookies are marked Secure.
+  - "Save to folder" must be a folder on the PC's own drives (no \\server\share network paths, which make Windows send its sign-in to that server) and can only be changed at the office PC.
+  - After 30 wrong passwords, PINs or reset codes from one device in 15 minutes, that device has to wait, so nobody can keep locking nurses out.
+  - Emailed reset codes: 10 wrong codes in an hour stops them for a while, even when new codes are requested.
+  - Unexpected errors no longer show internal details (they stay in the log file).
+- Dependencies: 0 known vulnerabilities (uuid pinned to a fixed version).
 
 ## 1.0.10
 
