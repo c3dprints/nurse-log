@@ -286,6 +286,50 @@ function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1', f
   });
 }
 
+// Copies installed from Setup.exe: update check and download against a fake GitHub.
+async function setupUpdaterTests() {
+  const updater = require('../lib/updater');
+  const exe = Buffer.from('fake installer');
+  const good = require('crypto').createHash('sha256').update(exe).digest('hex');
+  let sum = good;
+  const srv = http.createServer((q, s) => {
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    if (q.url === '/latest') {
+      s.setHeader('Content-Type', 'application/json');
+      return s.end(JSON.stringify({ tag_name: 'v9.9.9', assets: [
+        { name: 'NursesLog-Setup-9.9.9.exe', browser_download_url: `${base}/dl/setup.exe` },
+        { name: 'NursesLog-Setup-9.9.9.exe.sha256', browser_download_url: `${base}/dl/setup.sha256` },
+      ] }));
+    }
+    if (q.url === '/dl/setup.exe') { s.writeHead(302, { Location: '/files/setup.exe' }); return s.end(); }
+    if (q.url === '/files/setup.exe') return s.end(exe);
+    if (q.url === '/dl/setup.sha256') return s.end(`${sum}  NursesLog-Setup-9.9.9.exe\n`);
+    s.writeHead(404); s.end();
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  process.env.NL_RELEASES_URL = `http://127.0.0.1:${srv.address().port}`;
+  const appDir = path.join(tmp, 'setup-app');
+  fs.mkdirSync(appDir, { recursive: true });
+  fs.writeFileSync(path.join(appDir, '.setup'), 'x');
+  try {
+    await test('setup.exe copies: update check and checksum-verified download', async () => {
+      assert.strictEqual((await updater.mode(appDir)).kind, 'setup');
+      const c = await updater.check(appDir, '1.0.0');
+      assert.strictEqual(c.latest, 'v9.9.9');
+      assert.strictEqual(c.available, true);
+      assert.strictEqual(c.mode, 'setup');
+      const r = await updater.install(appDir, 'v9.9.9');
+      assert.deepStrictEqual(fs.readFileSync(r.file), exe, 'downloaded through the redirect');
+      await assert.rejects(updater.install(appDir, 'v9.9.8'), /newest release is now v9\.9\.9/);
+      sum = '0'.repeat(64);
+      await assert.rejects(updater.install(appDir, 'v9.9.9'), /checksum/);
+    });
+  } finally {
+    delete process.env.NL_RELEASES_URL;
+    srv.close();
+  }
+}
+
 async function httpTests() {
   const dataDir = path.join(tmp, 'http');
   const exportDir = path.join(tmp, 'exports');
@@ -585,6 +629,7 @@ async function httpTests() {
 
 (async () => {
   await unit();
+  await setupUpdaterTests();
   await httpTests();
   let failed = 0;
   for (const [ok, name, e] of results) {

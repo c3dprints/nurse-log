@@ -2,7 +2,7 @@
 // Publishes a release: `npm run release`
 // Checks that the version is new and logged in CHANGELOG.md, the tree is clean
 // and the tests pass, then pushes main and the vX.Y.Z tag that installed copies look for,
-// and makes the GitHub release with the one-click installer as its download.
+// and makes the GitHub releases: the Git installer here, NursesLog-Setup.exe in the public download repo.
 
 const fs = require('fs');
 const path = require('path');
@@ -39,9 +39,8 @@ try {
 execFileSync('git', ['push', '--quiet', 'origin', 'main'], { cwd: ROOT, stdio: 'inherit' });
 run('git', ['tag', '-a', tag, '-m', `Nurse's Log ${version}`]);
 execFileSync('git', ['push', '--quiet', 'origin', tag], { cwd: ROOT, stdio: 'inherit' });
-try {
-  require('./github-release').publish(tag);
-} catch {
-  console.error(`the tag is out, but the GitHub release with the download was not made; run: node scripts/github-release.js ${tag}`);
-}
+require('./github-release').publish(tag).catch((e) => {
+  console.error(`the tag is out, but a GitHub release or the Setup.exe was not made (${e.message}); run: node scripts/github-release.js ${tag}`);
+  process.exitCode = 1;
+});
 console.log(`released ${tag}. Installed copies will offer it on their next check (or press Check now).`);

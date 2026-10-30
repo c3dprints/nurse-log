@@ -65,7 +65,7 @@ async function checkForUpdate() {
   } finally {
     updateBusy = false;
   }
-  if (updateState.available && db.setting('autoUpdate', false) && updateState.mode === 'release') {
+  if (updateState.available && db.setting('autoUpdate', false) && ['release', 'setup'].includes(updateState.mode)) {
     installUpdate(updateState.latest, null).catch((e) => log(`auto update failed: ${e.message}`));
   }
   return updateState;
@@ -75,10 +75,11 @@ async function installUpdate(tag, user) {
   if (updateBusy) throw new Error('an update is already running');
   updateBusy = true;
   try {
-    await updater.install(APP_DIR, tag);
+    const r = await updater.install(APP_DIR, tag);
     db.audit(user, 'app.update', { details: `${pkg.version} -> ${tag}` });
-    log(`installed ${tag}, restarting`);
-    restart();
+    // The Setup.exe stops this server and starts the new one itself.
+    if (r && r.restartsItself) log(`running the installer for ${tag}`);
+    else { log(`installed ${tag}, restarting`); restart(); }
   } finally {
     updateBusy = false;
   }

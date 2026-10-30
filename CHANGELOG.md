@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.12
+
+- Windows installer: NursesLog-Setup-1.0.12.exe installs Nurse's Log for the signed-in user with no admin rights, Git or Node.js (it carries its own Node.js), and adds Desktop and Start menu shortcuts. Uninstall from Windows Settings > Apps; student records are kept.
+- Installer downloads are public at github.com/c3dprints/nurse-log-releases (installers only; the source code stays private).
+- Copies installed from the Setup.exe update themselves from Settings > Updates: the new installer is downloaded from that repo, checked against its SHA-256 and run silently, and the app reloads.
+
 ## 1.0.11
 
 - Settings > About (everyone): version, a notice that this is beta software for evaluation and testing only, needing further testing, a security review and proper licensing before use with real student records, and the license.

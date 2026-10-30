@@ -6,6 +6,10 @@ It runs on the nurse's PC. A small local server (127.0.0.1:8940, never reachable
 
 ## Install on a school PC
 
+Easiest: download **NursesLog-Setup-X.Y.Z.exe** from the public download repo, https://github.com/c3dprints/nurse-log-releases/releases/latest, and run it. It carries its own Node.js, needs no admin rights, installs to `%LOCALAPPDATA%\Programs\NursesLog` and updates itself from that repo. `npm run build:setup` builds it (needs Inno Setup 6); `npm run release` builds and publishes it.
+
+### Git install (developer copy)
+
 Needs [Git](https://git-scm.com) and [Node.js 20 LTS](https://nodejs.org). Then in PowerShell:
 
 ```powershell
