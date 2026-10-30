@@ -1013,7 +1013,8 @@ function assistBar(form, fields, { form: formName, studentId } = {}) {
   return h('div', { class: 'assist' },
     h('div', { class: 'row' }, canRecord ? mic : null,
       h('button', { class: 'btn small', type: 'button', onclick: () => typed.classList.toggle('hidden') }, 'Type notes'),
-      status),
+      status, h('div', { class: 'grow' }),
+      h('a', { class: 'small', href: '#/settings/help', target: '_blank', title: 'Opens the help in a new window so this form stays open' }, 'How to use')),
     typed, heard);
 }
 
@@ -1046,7 +1047,7 @@ function applyValues(form, list, values) {
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : [])];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : []), ['help', 'Help']];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -1057,7 +1058,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, help: setHelp })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -1300,8 +1301,87 @@ function setAi(body, d, reload) {
         h('li', {}, 'Add a payment method or credits under Billing. Filling in a form costs a fraction of a cent.'),
         h('li', {}, 'Open API keys, create a key, paste it above, then press Test the key.')),
       h('p', { class: 'muted small' }, 'The key is stored on this PC only and is never sent to the app window or to phones.')),
+    section('Show your team how to use it',
+      h('p', { class: 'muted' }, 'Everyone can read step-by-step instructions, tips and fixes in ', h('a', { href: '#/settings/help' }, 'Settings > Help'), '.')),
     section('Without ChatGPT',
       h('p', { class: 'muted' }, 'Windows has free dictation built in: click in any box and press the Windows key + H. On a phone, use the microphone key on the keyboard.')));
+}
+
+// Settings > Help: plain-language guide, open to every user.
+function setHelp(body) {
+  const steps = (...items) => h('ol', { class: 'help-steps' }, items.map((i) => h('li', {}, i)));
+  const say = (form, text) => h('div', { class: 'help-say' }, h('b', {}, form), h('p', {}, `\u201C${text}\u201D`));
+  const faq = (q, ...a) => h('details', { class: 'help-faq' }, h('summary', {}, q), h('div', {}, ...a));
+  body.append(
+    h('div', { class: 'alert ' + (S.aiReady ? 'ok' : 'warn') }, S.aiReady
+      ? 'Dictation with ChatGPT is turned on. Look for the Dictate button at the top of student, medication and visit forms.'
+      : 'Dictation with ChatGPT is not turned on yet. An admin sets it up once, in Settings > Dictation & ChatGPT (steps below).'),
+
+    section('What it does',
+      h('p', {}, 'Instead of typing into each box, you say (or type) your notes in your own words. ChatGPT reads them and fills in the matching boxes on the form you have open, for example the guardian\u2019s name and phone, a medication\u2019s dose and times, or a visit\u2019s reason and treatment.'),
+      h('p', {}, h('b', {}, 'It never saves anything by itself. '), 'The boxes it filled are outlined so you can check them, fix anything, and then press Save as usual.')),
+
+    section('Using it, step by step',
+      steps(
+        ['Open a form: ', h('b', {}, 'Add student'), ' or ', h('b', {}, 'Edit info'), ' on a student, ', h('b', {}, 'Add medication'), ', or ', h('b', {}, 'New visit'), '.'],
+        ['Press ', h('b', {}, '\u{1F3A4} Dictate'), ' at the top of the form. The first time, Windows or Chrome asks to use the microphone; choose ', h('b', {}, 'Allow'), '.'],
+        'Talk naturally, as if telling a colleague. A timer shows it is listening (up to 3 minutes).',
+        ['Press ', h('b', {}, '\u25A0 Stop'), '. After a few seconds the boxes fill in and are outlined.'],
+        ['Check every outlined box. Open ', h('b', {}, 'What was heard'), ' to see the words it picked up.'],
+        ['Fix anything that is wrong, then press ', h('b', {}, 'Save'), '.']),
+      h('p', { class: 'muted' }, 'Prefer typing or pasting? Press ', h('b', {}, 'Type notes'), ', type or paste (for example from a doctor\u2019s note), then press ', h('b', {}, 'Fill in the form'), '.')),
+
+    section('What to say',
+      h('p', { class: 'muted' }, 'Naming the box helps. These are examples; any wording works.'),
+      say('Student info', 'Guardian is Maria Lopez, phone 555 201 3344. Second contact is dad, Luis Lopez, 555 201 9988. Allergic to peanuts and penicillin. Has asthma. Medication permission form is on file. Takes Zyrtec 10 milligrams at home every morning. Pharmacy is the Walgreens on Main Street.'),
+      say('Medication', 'Albuterol inhaler, two puffs, inhaled, as needed for wheezing. Prescribed by Doctor Patel. Started September 3rd. We have one inhaler on hand.'),
+      say('Office visit', 'Came in with a headache, temperature 98.6. Rested for 15 minutes and had water. Felt better and went back to class. Called mom.')),
+
+    section('Tips for good results',
+      h('ul', {},
+        h('li', {}, 'Spell unusual names: \u201CKaitlyn, K A I T L Y N\u201D.'),
+        h('li', {}, 'Say phone numbers digit by digit. Phone boxes only take 10 digits.'),
+        h('li', {}, 'Say full dates (\u201CSeptember 3rd, 2026\u201D) or \u201Ctoday\u201D.'),
+        h('li', {}, 'Say doses and times exactly; ChatGPT keeps numbers as you say them.'),
+        h('li', {}, 'One student per recording. You can press Dictate again to add more; notes already in a box are kept and the new part is added under them.'),
+        h('li', {}, 'Use a quiet spot or a headset microphone if the office is noisy.'),
+        h('li', {}, 'The visit time and anything you do not mention are left alone.'))),
+
+    section('Setting it up (admin, once)',
+      steps(
+        ['Go to ', h('b', {}, 'platform.openai.com'), ' and sign in or create an account. This is OpenAI\u2019s API account; a ChatGPT Plus subscription does not include it.'],
+        ['Under ', h('b', {}, 'Billing'), ', add a payment method or a few dollars of credit. Filling in a form usually costs well under a cent.'],
+        ['Under ', h('b', {}, 'API keys'), ', create a new secret key and copy it (it starts with sk-).'],
+        ['In Nurse\u2019s Log, open ', S.user.role === 'admin' ? h('a', { href: '#/settings/ai' }, 'Settings > Dictation & ChatGPT') : h('b', {}, 'Settings > Dictation & ChatGPT'), ', paste the key, tick ', h('b', {}, 'Turn on the dictation assistant'), ', and press Save.'],
+        ['Press ', h('b', {}, 'Test the key'), '. When it says the key works, every user sees the Dictate button.']),
+      h('p', { class: 'muted small' }, 'The model boxes can stay as they are. Only change them if OpenAI retires a model or your district asks for a specific one.')),
+
+    section('Privacy',
+      h('ul', {},
+        h('li', {}, 'Your recording, the notes, and what is already typed in that form are sent to OpenAI to be read. Nothing else from Nurse\u2019s Log is sent.'),
+        h('li', {}, 'OpenAI does not use API data to train its models by default.'),
+        h('li', {}, 'Each use is written to the audit log with who, when, which form and which boxes were filled (not what was said).'),
+        h('li', {}, 'Check with your district before turning it on, as student health records fall under FERPA.'))),
+
+    section('On a phone',
+      h('p', {}, 'Over the Tailscale address the Dictate button is hidden, because phones only allow the microphone on secure (https) pages. Use ', h('b', {}, 'Type notes'), ' and tap the microphone key on the phone\u2019s keyboard to speak; then press ', h('b', {}, 'Fill in the form'), '.')),
+
+    section('If something goes wrong',
+      faq('There is no Dictate button',
+        h('p', {}, 'The assistant is not turned on, or you are on a phone (see above). Ask an admin to check Settings > Dictation & ChatGPT.')),
+      faq('\u201CThe microphone is blocked or missing\u201D',
+        h('p', {}, 'Make sure a microphone is plugged in. Then click the small icon at the left of the app\u2019s title bar, set Microphone to Allow, and reopen the form. In Windows Settings > Privacy & security > Microphone, desktop apps must be allowed to use it.')),
+      faq('\u201COpenAI rejected the API key\u201D',
+        h('p', {}, 'The key was deleted or typed wrong. An admin makes a new key at platform.openai.com and pastes it in Settings > Dictation & ChatGPT.')),
+      faq('\u201CYou exceeded your current quota\u201D or a billing message',
+        h('p', {}, 'The OpenAI account is out of credit. Add credit under Billing at platform.openai.com.')),
+      faq('\u201CNothing in the notes matched this form\u201D',
+        h('p', {}, 'Say the name of the box, such as \u201Cguardian phone\u201D or \u201Creason for visit\u201D, and try again. Open What was heard to see if the microphone picked you up.')),
+      faq('A box was filled in wrong',
+        h('p', {}, 'Just fix it before saving; nothing is saved until you press Save. If it keeps happening with a word, spell it out when you dictate.')),
+      faq('Without ChatGPT at all',
+        h('p', {}, 'Windows has free dictation: click in any box and press the Windows key + H. It types what you say into that one box.'))),
+  );
 }
 
 function setSaving(body, d, reload) {

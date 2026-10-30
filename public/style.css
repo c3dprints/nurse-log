@@ -290,3 +290,13 @@ tr.click:hover td { background: var(--panel-2); }
 [data-style="material"] .code { border-radius: 12px; }
 [data-style="material"] .theme-card { border-radius: 16px; }
 .theme-card.material .sw i { border-radius: 10px; }
+
+/* help */
+.help-steps li, .main ul li { margin-bottom: 6px; }
+.help-say { background: var(--panel-2); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+.help-say b { font-size: 12px; color: var(--muted); }
+.help-say p { margin: 4px 0 0; font-style: italic; }
+.help-faq { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.help-faq summary { cursor: pointer; font-weight: 600; }
+.help-faq p { margin: 6px 0 2px; }
+[data-style="material"] .help-say { border-radius: 12px; }

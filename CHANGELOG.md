@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.6
+
+- Settings > Help (for every user): how to use dictation with ChatGPT, with step-by-step use, example phrases for student, medication and visit forms, tips, one-time admin setup, privacy, phone use, and fixes for common messages. The Dictate bar has a "How to use" link, and Settings > Dictation & ChatGPT points to it.
+
 ## 1.0.5
 
 - Material themes: a new section in Settings > Appearance with soft, faded palettes (Mist, Blush, Eucalyptus, Lilac, Clay, Seafoam, plus dark Dusk and Slate). They also switch to a material look: rounder cards with gentle shadows, pill-shaped tonal buttons, filled text boxes, rounded navigation and dialogs. The original themes are unchanged.
