@@ -1,6 +1,7 @@
 'use strict';
 // One-click launcher: starts the server hidden if it is not running, then opens
-// the app window. `--background` starts the server only.
+// the app window. `--background` starts the server only; `nurseslog:<page>` (a clicked
+// Windows notification, see scripts/launch.vbs) opens the window on that page.
 // Safe to run any number of times.
 
 const http = require('http');
@@ -11,6 +12,8 @@ const { spawn } = require('child_process');
 const PORT = Number(process.env.NL_PORT || 8940);
 const URL = `http://127.0.0.1:${PORT}/`;
 const background = process.argv.includes('--background');
+const link = process.argv.map((a) => /^nurseslog:(today|calendar)$/i.exec(a)).find(Boolean);
+const START = link ? `${URL}#/${link[1].toLowerCase()}` : URL;
 
 function ping() {
   return new Promise((resolve) => {
@@ -49,8 +52,8 @@ function findBrowser() {
 function openWindow() {
   const browser = findBrowser();
   const child = browser
-    ? spawn(browser, [`--app=${URL}`, '--window-size=1180,860'], { detached: true, stdio: 'ignore' })
-    : spawn('cmd.exe', ['/c', 'start', '', URL], { detached: true, stdio: 'ignore', windowsHide: true });
+    ? spawn(browser, [`--app=${START}`, '--window-size=1180,860'], { detached: true, stdio: 'ignore' })
+    : spawn('cmd.exe', ['/c', 'start', '', START], { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
   // The page asks the server for the app's taskbar icon once it loads (lib/windowicon.js).
 }

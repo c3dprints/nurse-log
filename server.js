@@ -20,6 +20,9 @@ const updater = require('./lib/updater');
 const tailscale = require('./lib/tailscale');
 const ai = require('./lib/ai');
 const { giveWindowIcon } = require('./lib/windowicon');
+const { Alerts, LEADS, REPEATS } = require('./lib/alerts');
+const { Push } = require('./lib/push');
+const { showToast } = require('./lib/toast');
 const qrcode = require('qrcode-generator');
 const pkg = require('./package.json');
 
@@ -50,6 +53,8 @@ function log(msg) {
 let db;
 let auth;
 let records;
+let alerts;
+let push;
 
 const fail = (code, msg) => Object.assign(new Error(msg), { code });
 
@@ -379,6 +384,8 @@ function settingsPublic() {
     pinSignIn: db.setting('pinSignIn', true) !== false,
     exportFolder: db.setting('exportFolder', ''),
     autoUpdate: db.setting('autoUpdate', false),
+    medAlerts: alerts.settings(),
+    noSchool: db.setting('noSchool', []),
     smtp: { host: s.host || '', port: s.port || 587, user: s.user || '', from: s.from || '', hasPass: !!s.pass },
     ai: { enabled: !!a.enabled, model: a.model, transcribeModel: a.transcribeModel, hasKey: !!a.key },
     dataDir: DATA_DIR,
@@ -619,6 +626,43 @@ route('POST', '/api/reset/finish', { open: true }, ({ body, req }) => {
 // ---- records ----
 
 route('GET', '/api/today', () => records.today());
+// ---- medication reminders and calendar ------------------------------------------------
+
+route('GET', '/api/calendar', ({ query }) => records.calendar(String(query.month || '')));
+route('POST', '/api/students/:id/alerts', ({ params, body, user }) => records.setStudentAlerts(user, params.id, !!body.on));
+
+// The open window asks for the doses that need attention now (Today banner).
+// idle: the window polls this every 30 seconds, which must not count as activity.
+route('GET', '/api/alerts', { idle: true }, ({ user }) => ({ on: alerts.settings().on, items: alerts.open(), phones: push.count(user.id) }));
+
+route('GET', '/api/push/key', () => ({ key: push.keys().publicKey }));
+route('POST', '/api/push/subscribe', ({ body, user }) => {
+  push.subscribe(user.id, body);
+  db.audit(user, 'alerts.phone-on', { details: 'phone notifications turned on' });
+  return { phones: push.count(user.id) };
+});
+route('POST', '/api/push/unsubscribe', ({ body, user }) => {
+  push.unsubscribe(body.endpoint);
+  return { phones: push.count(user.id) };
+});
+route('POST', '/api/push/test', async ({ user }) => {
+  const n = await push.send({ title: 'Nurse\u2019s Log', body: 'Phone notifications work. Medication reminders will look like this.', tag: 'test', url: '/#/today' }, user.id);
+  if (!n) throw fail(400, 'no phone of yours is set up for notifications yet');
+  return { sent: n };
+});
+route('POST', '/api/alerts/test-windows', { admin: true }, ({ req }) => {
+  if (isRemote(req)) throw fail(400, 'Windows notifications show on the office PC; test it from there');
+  if (!NO_DIALOGS) showToast(APP_DIR, { title: 'Nurse\u2019s Log', body: 'Windows notifications work. Medication reminders will look like this.' });
+  return { ok: true };
+});
+
+// Sends new reminders: a Windows notification on this PC and a push to signed-up phones.
+async function sendAlerts(items, msg, s) {
+  log(`medication reminder: ${items.length} due (${items.map((i) => `${i.name} ${i.time}`).join(', ')})`);
+  if (s.windows && !NO_DIALOGS) showToast(APP_DIR, msg);
+  if (s.phone) await push.send({ ...msg, tag: items.length === 1 ? items[0].key : 'meds-due', url: '/#/today' }).catch((e) => log(`push failed: ${e.message}`));
+}
+
 route('GET', '/api/meds-due', ({ query }) => records.medsDue(/^\d{4}-\d\d-\d\d$/.test(query.day || '') ? query.day : null));
 
 route('GET', '/api/students', ({ query }) => {
@@ -813,7 +857,7 @@ route('POST', '/api/users/:id', { admin: true }, ({ params, body, user }) => {
     if (admins <= 1) throw fail(400, 'keep at least one active admin');
   }
   db.run('UPDATE users SET full_name = ?, email = ?, role = ?, active = ? WHERE id = ?', [fullName, email, role, active, u.id]);
-  if (!active) { auth.endSessionsFor(u.id); auth.forgetDevices(u.id); }
+  if (!active) { auth.endSessionsFor(u.id); auth.forgetDevices(u.id); push.forgetUser(u.id); }
   db.audit(user, 'user.update', { entity: 'user', entityId: u.id, details: { username: u.username, fullName, email, role, active: !!active } });
   return auth.publicUser(auth.user(u.id));
 });
@@ -864,6 +908,23 @@ route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
     db.setSetting('pinSignIn', on);
     if (!on) auth.forgetDevices(); // every remembered phone signs in with a password again
     changed.pinSignIn = on;
+  }
+  if ('medAlerts' in body) {
+    const a = body.medAlerts || {};
+    const v = { on: !!a.on, lead: Number(a.lead), repeat: Number(a.repeat), windows: !!a.windows, phone: !!a.phone };
+    if (!LEADS.includes(v.lead) || !REPEATS.includes(v.repeat)) throw fail(400, 'pick a reminder time from the list');
+    db.setSetting('medAlerts', v);
+    changed.medAlerts = v;
+  }
+  if ('noSchool' in body) {
+    const list = Array.isArray(body.noSchool) ? body.noSchool : [];
+    if (list.length > 200) throw fail(400, 'too many no-school days');
+    const day = /^\d{4}-\d\d-\d\d$/;
+    const clean = list.map((c) => ({ from: String(c.from || ''), to: String(c.to || c.from || ''), label: String(c.label || '').trim().slice(0, 60) }));
+    for (const c of clean) if (!day.test(c.from) || !day.test(c.to) || c.to < c.from) throw fail(400, 'each no-school entry needs a first and last date, in order');
+    clean.sort((a, b) => a.from.localeCompare(b.from));
+    db.setSetting('noSchool', clean);
+    changed.noSchool = clean.length;
   }
   if ('autoUpdate' in body) { db.setSetting('autoUpdate', !!body.autoUpdate); changed.autoUpdate = !!body.autoUpdate; }
   if ('remoteAccess' in body) {
@@ -1024,7 +1085,7 @@ async function handle(req, res) {
   const params = { id: m[1] ? Number(m[1]) : null };
 
   const token = cookieToken(req);
-  const user = auth.session(token);
+  const user = auth.session(token, !r.idle);
   try {
     if (!r.open) {
       if (!user) throw fail(401, 'signed out');
@@ -1071,6 +1132,8 @@ server.on('error', (e) => {
   db = await Db.open(DATA_DIR);
   auth = new Auth(db);
   records = new Records(db);
+  push = new Push(db, log);
+  alerts = new Alerts(db, records, sendAlerts);
   server.listen(PORT, HOST);
   const syncSafe = () => syncRemote().catch((e) => log(`remote access: ${e.message}`));
   server.once('listening', syncSafe); // after the main port is ours, so an old copy still shutting down is not raced
@@ -1080,6 +1143,7 @@ server.on('error', (e) => {
     setInterval(() => checkForUpdate().catch(() => {}), 6 * 60 * 60 * 1000).unref();
   }
   setInterval(() => { try { db.backup(); } catch (e) { log(`backup failed: ${e.message}`); } }, 60 * 60 * 1000).unref();
+  setInterval(() => alerts.tick().catch((e) => log(`reminders failed: ${e.message}`)), 30 * 1000).unref();
   const prune = () => { try { db.pruneAudit(db.setting('auditDays', AUDIT_DAYS)); } catch (e) { log(`audit prune failed: ${e.message}`); } };
   prune();
   setInterval(prune, 60 * 60 * 1000).unref();

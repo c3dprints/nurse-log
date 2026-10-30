@@ -47,6 +47,14 @@ Source: "..\build\stage\*"; DestDir: "{app}"; Flags: recursesubdirs createallsub
 Name: "{userprograms}\Nurse's Log"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\public\icon.ico"; Comment: "Nurse's Log, school nurse office records"; AppUserModelID: "c3dprints.NursesLog"
 Name: "{userdesktop}\Nurse's Log"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\public\icon.ico"; Comment: "Nurse's Log, school nurse office records"; Tasks: desktopicon; AppUserModelID: "c3dprints.NursesLog"
 
+[Registry]
+; nurseslog: links open the app; a medication reminder's Windows notification uses
+; nurseslog:today (lib/toast.js, scripts/launch.vbs).
+Root: HKCU; Subkey: "Software\Classes\nurseslog"; ValueType: string; ValueData: "URL:Nurse's Log"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\nurseslog"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\nurseslog\DefaultIcon"; ValueType: string; ValueData: "{app}\app\public\icon.ico"
+Root: HKCU; Subkey: "Software\Classes\nurseslog\shell\open\command"; ValueType: string; ValueData: """{sys}\wscript.exe"" ""{app}\app\scripts\launch.vbs"" ""%1"""
+
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; Description: "Open Nurse's Log"; Flags: postinstall nowait skipifsilent
 ; After a silent update from inside the app, start the server again; the open window reloads itself.

@@ -16,7 +16,7 @@ const STAGE = path.join(BUILD, 'stage');
 const CACHE = path.join(BUILD, 'cache');
 const DIST = path.join(ROOT, 'dist');
 // What the installed app needs; everything else (tests, build scripts) stays out.
-const APP_FILES = ['server.js', 'launch.js', 'package.json', 'package-lock.json', 'LICENSE', 'lib', 'public', 'scripts/launch.vbs', 'scripts/window-icon.ps1'];
+const APP_FILES = ['server.js', 'launch.js', 'package.json', 'package-lock.json', 'LICENSE', 'lib', 'public', 'scripts/launch.vbs', 'scripts/window-icon.ps1', 'scripts/toast.ps1'];
 
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 

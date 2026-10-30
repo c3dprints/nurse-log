@@ -128,8 +128,9 @@ async function unit() {
     assert.strictEqual(rec.searchStudents({ q: 'peanut' }).length, 1);
     assert.strictEqual(rec.searchStudents({ q: '100%' }).length, 0, 'LIKE wildcards are escaped');
     rec.updateStudent(admin, s.id, { homeroom: 'Rm 12' });
-    const m = rec.createMedication(admin, s.id, { name: 'Albuterol', dose: '2 puffs', times: '9:00, 13:00', on_hand: 3 });
+    const m = rec.createMedication(admin, s.id, { name: 'Albuterol', dose: '2 puffs', times: '9:00, 13:00', days: '7,1,2,3,4,5,6,9', on_hand: 3 });
     assert.strictEqual(m.times, '09:00, 13:00');
+    assert.strictEqual(m.days, '1,2,3,4,5,6,7', 'every day, out-of-range days dropped');
     let due = rec.medsDue();
     assert.strictEqual(due.scheduled.length, 2);
     const g = rec.recordGiven(admin, m.id, { scheduled: '09:00' });
@@ -153,6 +154,56 @@ async function unit() {
     assert.strictEqual(rec.searchStudents({}).length, 0);
     assert.strictEqual(rec.medsDue().scheduled.length, 0, 'archived students drop off Today');
     rec.setArchived(admin, s.id, false);
+  });
+
+  await test('medications follow their weekdays and the no-school days', () => {
+    const s = rec.createStudent(admin, { first_name: 'Wes', last_name: 'Day' });
+    const school = rec.createMedication(admin, s.id, { name: 'SchoolDaysMed', times: '10:00' });
+    const mwf = rec.createMedication(admin, s.id, { name: 'MwfMed', times: '11:00', days: '1,3,5' });
+    const names = (date) => rec.medsDue(date).scheduled.filter((r) => r.student_id === s.id).map((r) => r.name);
+    assert.deepStrictEqual(names('2026-11-02'), ['SchoolDaysMed', 'MwfMed'], 'Monday');
+    assert.deepStrictEqual(names('2026-11-03'), ['SchoolDaysMed'], 'Tuesday');
+    assert.deepStrictEqual(names('2026-11-07'), [], 'Saturday: blank days means school days only');
+    db.setSetting('noSchool', [{ from: '2026-11-25', to: '2026-11-27', label: 'Thanksgiving break' }]);
+    assert.deepStrictEqual(names('2026-11-25'), []);
+    assert.strictEqual(rec.medsDue('2026-11-26').closed, 'Thanksgiving break');
+    assert.deepStrictEqual(names('2026-11-30'), ['SchoolDaysMed', 'MwfMed']);
+    const cal = rec.calendar('2026-11');
+    assert.strictEqual(cal.days.length, 30);
+    assert.strictEqual(cal.days.find((d) => d.date === '2026-11-26').closed, 'Thanksgiving break');
+    assert(cal.days.find((d) => d.date === '2026-11-02').due >= 2);
+    assert.throws(() => rec.calendar('Nov'), /month/);
+    db.setSetting('noSchool', []);
+    for (const t of ['medications', 'students']) db.run(`DELETE FROM ${t} WHERE ${t === 'students' ? 'id' : 'student_id'} = ?`, [s.id]);
+    assert.ok(school.id && mwf.id);
+  });
+
+  await test('reminders: before the dose, again while not recorded, never when turned off', async () => {
+    const { Alerts, message } = require('../lib/alerts');
+    const s = rec.createStudent(admin, { first_name: 'Rae', last_name: 'Minder', allergies: 'Latex' });
+    const m = rec.createMedication(admin, s.id, { name: 'Ritalin', dose: '10 mg', times: '12:00', days: '1,2,3,4,5,6,7' });
+    const sent = [];
+    const al = new Alerts(db, rec, async (items, msg) => { sent.push({ keys: items.map((i) => `${i.medication_id}:${i.stage}`), msg }); });
+    const at = (hm) => new Date(`2026-11-04T${hm}:00`).getTime();
+    const mine = (list) => list.filter((i) => i.medication_id === m.id);
+    db.setSetting('medAlerts', { on: true, lead: 10, repeat: 15, windows: false, phone: false });
+    assert.strictEqual(mine(al.open(at('11:49'))).length, 0, 'not yet');
+    assert.strictEqual(mine(await al.tick(at('11:50'))).length, 1, '10 minutes before');
+    assert.strictEqual(mine(await al.tick(at('11:55'))).length, 0, 'sent once');
+    assert.strictEqual(mine(await al.tick(at('12:15')))[0].stage, 1, 'reminder after 15 minutes');
+    assert.match(sent[0].msg.title, /^Rae M\.: Ritalin 10 mg$/, 'first name and initial only');
+    assert.match(message([{ ...mine(al.open(at('12:16')))[0] }]).body, /Still not recorded/);
+    rec.recordGiven(admin, m.id, { scheduled: '12:00', given_at: at('12:20') });
+    assert.strictEqual(mine(al.open(at('12:31'))).length, 0, 'recorded doses stop');
+    rec.createMedication(admin, s.id, { name: 'Second', times: '13:00', days: '1,2,3,4,5,6,7' });
+    rec.setStudentAlerts(admin, s.id, false);
+    assert.strictEqual(al.open(at('13:00')).filter((i) => i.student_id === s.id).length, 0, 'student turned off');
+    rec.setStudentAlerts(admin, s.id, true);
+    assert.strictEqual(al.open(at('13:00')).filter((i) => i.student_id === s.id).length, 1);
+    db.setSetting('medAlerts', { on: false, lead: 0, repeat: 0, windows: false, phone: false });
+    assert.strictEqual(al.open(at('13:00')).length, 0, 'turned off for everyone');
+    db.setSetting('medAlerts', {});
+    for (const t of ['med_given', 'medications', 'students']) db.run(`DELETE FROM ${t} WHERE ${t === 'students' ? 'id' : 'student_id'} = ?`, [s.id]);
   });
 
   await test('guardian phones: 10 digits, formatted', () => {
@@ -654,6 +705,37 @@ async function httpTests() {
       assert.doesNotMatch(cookie, /nl_device=/, 'the forgotten cookie is cleared');
       cookie = pcCookie;
       assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: false })).status, 200);
+    });
+
+    await test('http: medication reminders, no-school days, calendar, phone sign-up', async () => {
+      assert.match((await req('POST', '/api/settings', { medAlerts: { on: true, lead: 7, repeat: 15 } })).json.error, /from the list/);
+      assert.strictEqual((await req('POST', '/api/settings', { medAlerts: { on: true, lead: 5, repeat: 10, windows: true, phone: false } })).status, 200);
+      assert.deepStrictEqual((await req('GET', '/api/settings')).json.settings.medAlerts, { on: true, lead: 5, repeat: 10, windows: true, phone: false });
+      const d = new Date();
+      const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      assert.match((await req('POST', '/api/settings', { noSchool: [{ from: day, to: '2000-01-01' }] })).json.error, /in order/);
+      assert.strictEqual((await req('POST', '/api/settings', { noSchool: [{ from: day, to: day, label: 'Snow day' }] })).status, 200);
+      assert.strictEqual((await req('GET', '/api/today')).json.meds.closed, 'Snow day');
+      const cal = (await req('GET', `/api/calendar?month=${day.slice(0, 7)}`)).json;
+      assert.strictEqual(cal.days.find((x) => x.today).closed, 'Snow day');
+      assert.strictEqual((await req('GET', '/api/calendar?month=nope')).status, 400);
+      assert.strictEqual((await req('POST', '/api/settings', { noSchool: [] })).status, 200);
+      assert.strictEqual((await req('GET', '/api/today')).json.meds.closed, null);
+
+      assert.strictEqual((await req('POST', `/api/students/${sid}/alerts`, { on: false })).json.medAlerts, false);
+      assert.strictEqual((await req('GET', `/api/students/${sid}`)).json.student.med_alerts, 'off');
+      assert.strictEqual((await req('POST', `/api/students/${sid}/alerts`, { on: true })).json.medAlerts, true);
+      const a = (await req('GET', '/api/alerts')).json;
+      assert.strictEqual(a.on, true);
+      assert(Array.isArray(a.items));
+      assert.strictEqual(a.phones, 0);
+
+      assert.match((await req('GET', '/api/push/key')).json.key, /^[A-Za-z0-9_-]{80,}$/);
+      assert.strictEqual((await req('POST', '/api/push/subscribe', { endpoint: 'http://not-https.example' })).status, 400);
+      const sub = { endpoint: 'https://push.example.org/send/abc123def456', keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } };
+      assert.strictEqual((await req('POST', '/api/push/subscribe', sub)).json.phones, 1);
+      assert.strictEqual((await req('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint })).json.phones, 0);
+      assert.strictEqual((await req('POST', '/api/alerts/test-windows')).status, 200);
     });
 
     await test('http: wrong sign-ins from one address are slowed; save folder must be a local drive', async () => {

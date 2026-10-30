@@ -25,6 +25,7 @@ const ICONS = {
   meds: 'M10.5 20.5 3.5 13.5a4.95 4.95 0 0 1 7-7l7 7a4.95 4.95 0 0 1-7 7ZM7 10l7 7',
   audit: 'M12 3 4.5 6v5.5c0 4.5 3.2 8.3 7.5 9.5 4.3-1.2 7.5-5 7.5-9.5V6L12 3ZM9 12l2 2 4-4',
   settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z',
+  calendar: 'M8 2v3M16 2v3M3.5 9h17M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v13A1.5 1.5 0 0 1 19 20.5H5A1.5 1.5 0 0 1 3.5 19V6A1.5 1.5 0 0 1 5 4.5ZM8 13h.01M12 13h.01M16 13h.01M8 17h.01M12 17h.01M16 17h.01',
   out: 'M15 4h3.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H15M10 16l4-4-4-4M14 12H4',
 };
 function icon(name) {
@@ -285,7 +286,17 @@ function fmtPhone(v) {
   return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
 }
 
-// fields: [name, label, type, opts]; type: text|email|password|date|number|textarea|select|check|datetime|tel|heading
+// ISO weekdays, Monday = 1. A medication with no days set is given Monday to Friday.
+const WEEKDAYS = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [7, 'Sun']];
+const medDays = (m) => { const d = String((m && m.days) || '').split(',').map(Number).filter((n) => n >= 1 && n <= 7); return d.length ? d : [1, 2, 3, 4, 5]; };
+function daysLabel(days) {
+  const s = days.join(',');
+  if (s === '1,2,3,4,5') return '';
+  if (s === '1,2,3,4,5,6,7') return 'every day';
+  return WEEKDAYS.filter(([n]) => days.includes(n)).map(([, l]) => l).join(', ');
+}
+
+// fields: [name, label, type, opts]; type: text|email|password|date|number|textarea|select|check|datetime|tel|days|heading
 function formGrid(fields, values = {}) {
   const form = h('form', { class: 'grid', onsubmit: (e) => e.preventDefault() });
   for (const [name, label, type = 'text', opts = {}] of fields) {
@@ -300,6 +311,11 @@ function formGrid(fields, values = {}) {
     else if (type === 'check') {
       form.append(h('div', { class: opts.wide ? 'wide' : null }, h('label', { class: 'check' }, h('input', { type: 'checkbox', name, checked: !!v }), label)));
       continue;
+    } else if (type === 'days') {
+      const on = medDays({ days: v });
+      form.append(h('div', { class: 'wide' }, h('label', {}, label), h('div', { class: 'days', role: 'group', 'aria-label': label },
+        WEEKDAYS.map(([n, l]) => h('label', { class: 'day' }, h('input', { type: 'checkbox', name: `${name}:${n}`, checked: on.includes(n) }), l)))));
+      continue;
     } else if (type === 'datetime') input = h('input', { type: 'datetime-local', name, value: toLocalInput(v || Date.now()) });
     else input = h('input', { type, name, value: v ?? '', placeholder: opts.placeholder || null, autocomplete: opts.autocomplete || 'off', list: opts.list || null, min: opts.min ?? null });
     if (type === 'textarea') input.value = v ?? '';
@@ -313,7 +329,9 @@ function readForm(form) {
   const out = {};
   for (const el of form.elements) {
     if (!el.name) continue;
-    if (el.type === 'checkbox') out[el.name] = el.checked;
+    const [base, day] = el.name.split(':');
+    if (day) out[base] = [out[base], el.checked ? day : ''].filter(Boolean).join(',');
+    else if (el.type === 'checkbox') out[el.name] = el.checked;
     else if (el.type === 'datetime-local') out[el.name] = fromLocalInput(el.value);
     else out[el.name] = el.value;
   }
@@ -733,6 +751,7 @@ const NAV = [
   ['students', 'Students', 'students', false, 'Students'],
   ['visits', 'Visit log', 'visits', false, 'Visits'],
   ['given', 'Medication log', 'meds', false, 'Meds'],
+  ['calendar', 'Calendar', 'calendar', false, 'Calendar'],
 ];
 
 function renderShell() {
@@ -753,7 +772,8 @@ function renderShell() {
         h('div', {}, h('b', {}, S.user.fullName), `${S.user.username} \u00B7 ${S.user.role}`))),
     main));
   offerUpdate();
-  const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, audit: async () => go('#/settings/audit'), settings: viewSettings };
+  startAlerts();
+  const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, calendar: viewCalendar, audit: async () => go('#/settings/audit'), settings: viewSettings };
   (views[r.name] || viewToday)(main, r).catch((e) => {
     if (e.message !== 'signed out') fill(main, h('div', { class: 'alert bad' }, e.message));
   });
@@ -774,6 +794,7 @@ async function viewToday(main) {
       h('div', { class: 'card' }, h('b', {}, left), h('span', {}, 'scheduled doses left')),
       h('div', { class: 'card' }, h('b', {}, t.counts.activeMeds), h('span', {}, 'active medications')),
       h('div', { class: 'card' }, h('b', {}, t.counts.students), h('span', {}, 'students'))),
+    t.meds.closed ? h('div', { class: 'alert warn' }, h('b', {}, `No school today: ${t.meds.closed}. `), 'Scheduled medications and reminders are off for the day.') : null,
     t.lowStock.length ? h('div', { class: 'alert warn' }, 'Running low: ', t.lowStock.map((m, i) => [i ? ', ' : '', `${m.name} for ${m.first_name} ${m.last_name} (${m.on_hand} left)`])) : null,
     h('div', { class: 'panel' }, h('h2', {}, 'Medications due today'),
       table([
@@ -782,7 +803,7 @@ async function viewToday(main) {
         { label: 'Medication', get: (r) => [r.name, r.dose && ` \u00B7 ${r.dose}`, r.route && ` \u00B7 ${r.route}`] },
         { label: 'Status', get: (r) => (r.record ? statusPill(r.record.status, fmtTime(r.record.given_at))
           : h('button', { class: 'btn small primary', onclick: () => giveForm(r, r.time, reload) }, 'Record dose')) },
-      ], due, { empty: 'No scheduled medications today.', onRow: (r) => go(`#/student/${r.student_id}/meds`) })),
+      ], due, { empty: t.meds.closed ? 'No school today.' : 'No scheduled medications today.', onRow: (r) => go(`#/student/${r.student_id}/meds`) })),
     t.meds.prn.length ? h('div', { class: 'panel' }, h('h2', {}, 'As-needed (PRN) medications on file'),
       table([
         { label: 'Student', get: fullName },
@@ -839,6 +860,134 @@ function stardate() {
 function statusPill(status, when) {
   const cls = status === 'given' ? 'ok' : status === 'refused' || status === 'missed' ? 'bad' : 'warn';
   return h('span', { class: 'pill ' + cls }, status + (when ? ' ' + when : ''));
+}
+
+// ---- calendar -----------------------------------------------------------------------
+
+async function viewCalendar(main, r) {
+  const month = /^\d{4}-\d\d$/.test(r.tab || '') ? r.tab : today().slice(0, 7);
+  const cal = await get(`/api/calendar?month=${month}`);
+  const [y, mo] = month.split('-').map(Number);
+  const shift = (n) => { const d = new Date(y, mo - 1 + n, 1); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}`; };
+  const lead = (new Date(y, mo - 1, 1).getDay() + 6) % 7; // Monday first
+  const dayBox = h('div', {});
+  let picked = 0;
+  const cells = cal.days.map((d, i) => {
+    const line = d.closed ? h('span', { class: 'cal-closed' }, d.closed)
+      : !d.due ? null
+        : d.past || d.today ? h('span', { class: 'cal-count' + (d.pending && d.past ? ' bad' : d.pending ? '' : ' ok') }, d.pending ? `${d.pending} of ${d.due} not recorded` : `${d.due} recorded`)
+          : h('span', { class: 'cal-count' }, `${d.due} dose${d.due === 1 ? '' : 's'}`);
+    return h('button', {
+      type: 'button', class: 'cal-day' + (d.today ? ' today' : '') + (d.closed ? ' closed' : '') + (d.past ? ' past' : ''),
+      'aria-label': `${new Date(`${d.date}T12:00:00`).toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })}${d.closed ? `, ${d.closed}` : d.due ? `, ${d.due} scheduled doses` : ''}`,
+      onclick: () => pick(i).catch((e) => toast(e.message, true)),
+    }, h('b', {}, i + 1), line);
+  });
+  const reloadDay = () => viewCalendar(main, { ...r, tab: month, day: picked });
+  async function pick(i) {
+    picked = i;
+    const d = cal.days[i];
+    cells.forEach((c, j) => c.classList.toggle('on', j === i));
+    const due = await get(`/api/meds-due?day=${d.date}`);
+    const canRecord = d.date <= today();
+    fill(dayBox, h('div', { class: 'panel' }, h('h2', {}, new Date(`${d.date}T12:00:00`).toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })),
+      due.closed ? h('div', { class: 'alert warn' }, `No school: ${due.closed}. No scheduled doses.`) : table([
+        { label: 'Time', nowrap: true, get: (x) => fmtHM(x.time) },
+        { label: 'Student', get: (x) => [fullName(x), x.med_alerts === 'off' ? h('span', { class: 'pill', style: 'margin-left:6px', title: 'Reminders are off for this student' }, 'no reminders') : null] },
+        { label: 'Medication', get: (x) => [x.name, x.dose && ` \u00B7 ${x.dose}`] },
+        { label: 'Status', get: (x) => (x.record ? statusPill(x.record.status, fmtTime(x.record.given_at))
+          : canRecord ? h('button', { class: 'btn small primary', onclick: () => giveForm(x, x.time, reloadDay, d.date) }, 'Record dose') : h('span', { class: 'muted' }, 'scheduled')) },
+      ], due.scheduled, { empty: 'No scheduled medications this day.', onRow: (x) => go(`#/student/${x.student_id}/meds`) })));
+  }
+  fill(main,
+    h('div', { class: 'head' }, h('h1', {}, 'Calendar'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn', type: 'button', 'aria-label': 'Previous month', onclick: () => go(`#/calendar/${shift(-1)}`) }, '\u2039'),
+        h('b', { class: 'cal-month' }, new Date(y, mo - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' })),
+        h('button', { class: 'btn', type: 'button', 'aria-label': 'Next month', onclick: () => go(`#/calendar/${shift(1)}`) }, '\u203A'),
+        month !== today().slice(0, 7) ? h('button', { class: 'btn', type: 'button', onclick: () => go('#/calendar') }, 'This month') : null),
+      h('div', { class: 'grow' }),
+      S.user.role === 'admin' ? h('button', { class: 'btn', type: 'button', onclick: () => go('#/settings/alerts') }, 'No-school days') : null),
+    h('div', { class: 'panel' }, h('div', { class: 'cal' },
+      WEEKDAYS.map(([, l]) => h('div', { class: 'cal-head' }, l)),
+      Array.from({ length: lead }, () => h('div', { class: 'cal-blank' })),
+      cells)),
+    dayBox);
+  await pick(r.day != null ? r.day : Math.max(0, cal.days.findIndex((d) => d.today)));
+}
+
+// ---- medication reminders in the window ------------------------------------------------
+// The server decides what is due (Settings > Medication alerts); this window asks every
+// 30 seconds and shows a card with a chime for each new one. Snooze and dismiss are kept
+// on this computer only. Windows notifications and phone pushes come from the server.
+
+const ALERT_KEY = 'nl.alertsApp';
+const alertsOnHere = () => { try { return localStorage.getItem(ALERT_KEY) !== 'off'; } catch { return true; } };
+const ALERTS = { timer: null, hidden: {}, seen: new Set(), last: [] };
+try { ALERTS.hidden = JSON.parse(localStorage.getItem('nl.alertsHidden') || '{}') || {}; } catch { /* private window */ }
+
+function startAlerts() {
+  if (ALERTS.timer) return;
+  ALERTS.timer = setInterval(pollAlerts, 30000);
+  pollAlerts();
+}
+
+async function pollAlerts() {
+  if (!S.user || reauthing) return;
+  try {
+    const a = await api('GET', '/api/alerts', null, { noReauth: true });
+    ALERTS.last = a.on && Array.isArray(a.items) ? a.items : [];
+  } catch { return; }
+  showAlerts();
+}
+
+// Snooze hides a dose until a time; Dismiss hides one reminder, and the next reminder for
+// a dose still not recorded shows again.
+function hideAlert(key, until) {
+  ALERTS.hidden[key] = until;
+  const old = Date.now() - 86400000;
+  for (const [k, t] of Object.entries(ALERTS.hidden)) if (t < old) delete ALERTS.hidden[k];
+  try { localStorage.setItem('nl.alertsHidden', JSON.stringify(ALERTS.hidden)); } catch { /* private window */ }
+  showAlerts();
+}
+
+function chime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [[880, 0], [660, 0.22]].forEach(([f, at]) => {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + at);
+      g.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + at + 0.35);
+      o.connect(g).connect(ctx.destination);
+      o.start(ctx.currentTime + at);
+      o.stop(ctx.currentTime + at + 0.4);
+    });
+    setTimeout(() => ctx.close(), 1000);
+  } catch { /* no sound */ }
+}
+
+function showAlerts() {
+  let box = document.getElementById('med-alerts');
+  if (!box) { box = h('div', { id: 'med-alerts', role: 'region', 'aria-label': 'Medication reminders', 'aria-live': 'polite' }); document.body.append(box); }
+  const now = Date.now();
+  const items = !S.user || !alertsOnHere() ? [] : ALERTS.last.filter((i) => !(ALERTS.hidden[i.key] > now) && !ALERTS.hidden[`${i.key}|${i.stage}`]);
+  let fresh = false;
+  for (const i of items) if (!ALERTS.seen.has(`${i.key}|${i.stage}`)) { ALERTS.seen.add(`${i.key}|${i.stage}`); fresh = true; }
+  if (fresh) chime();
+  const refresh = () => { pollAlerts(); if (['today', 'calendar', 'student'].includes(route().name)) render(); };
+  const shown = items.slice(0, 3);
+  fill(box, shown.map((i) => h('div', { class: 'med-alert' + (i.stage ? ' late' : '') },
+    h('div', { class: 'med-alert-top' }, h('b', {}, `${i.first_name} ${i.last_name}`), h('span', { class: 'muted small' }, `${i.stage ? 'Not recorded \u00B7 ' : ''}due ${fmtHM(i.time)}`)),
+    h('div', {}, [i.name, i.dose, i.route].filter(Boolean).join(' \u00B7 ')),
+    i.allergies ? h('div', { class: 'pill bad', style: 'margin-top:4px' }, 'Allergy: ' + i.allergies) : null,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn small primary', type: 'button', onclick: () => giveForm({ ...i, id: i.medication_id }, i.time, refresh) }, 'Record dose'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => hideAlert(i.key, Date.now() + 10 * 60000) }, 'Snooze 10 min'),
+      h('button', { class: 'btn small', type: 'button', onclick: () => hideAlert(`${i.key}|${i.stage}`, Date.now()) }, 'Dismiss')))),
+  items.length > shown.length ? h('button', { class: 'med-alert more', type: 'button', onclick: () => go('#/today') }, `+${items.length - shown.length} more due \u2014 see Today`) : null);
 }
 
 // ---- students -----------------------------------------------------------------------
@@ -990,12 +1139,22 @@ async function viewStudent(main, r) {
     h('dl', { class: 'kv' }, kv(STUDENT_FORM.slice(cut + 1))),
     h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn', onclick: () => studentForm(s, reload) }, 'Edit info')));
   } else if (tab === 'meds') {
+    const remind = h('input', { type: 'checkbox', checked: s.med_alerts !== 'off' });
+    remind.addEventListener('change', async () => {
+      try {
+        await post(`/api/students/${s.id}/alerts`, { on: remind.checked });
+        s.med_alerts = remind.checked ? null : 'off';
+        toast(remind.checked ? `Reminders on for ${s.first_name}` : `Reminders off for ${s.first_name}`);
+      } catch (e) { remind.checked = !remind.checked; toast(e.message, true); }
+    });
     body.append(
-      h('div', { class: 'row', style: 'margin-bottom:10px' }, h('button', { class: 'btn primary', onclick: () => medForm(s, null, reload) }, 'Add medication')),
+      h('div', { class: 'row', style: 'margin-bottom:10px' }, h('button', { class: 'btn primary', onclick: () => medForm(s, null, reload) }, 'Add medication'),
+        h('div', { class: 'grow' }),
+        h('label', { class: 'check', title: 'Pop-up and phone reminders when a scheduled dose is due' }, remind, `Medication reminders for ${s.first_name}`)),
       table([
         { label: 'Medication', get: (m) => [h('b', {}, m.name), m.active ? null : h('span', { class: 'pill', style: 'margin-left:6px' }, 'stopped')] },
         { label: 'Dose', get: (m) => [m.dose, m.route && ` \u00B7 ${m.route}`] },
-        { label: 'When', get: (m) => [m.times ? m.times.split(', ').map(fmtHM).join(', ') : '', m.prn ? h('span', { class: 'pill', style: 'margin-left:6px' }, 'as needed') : null] },
+        { label: 'When', get: (m) => [m.times ? m.times.split(', ').map(fmtHM).join(', ') : '', m.times && daysLabel(medDays(m)) ? h('div', { class: 'muted small' }, daysLabel(medDays(m))) : null, m.prn ? h('span', { class: 'pill', style: 'margin-left:6px' }, 'as needed') : null] },
         { label: 'Dates', nowrap: true, get: (m) => [m.start_date || '', m.end_date ? ` to ${m.end_date}` : ''] },
         { label: 'On hand', get: (m) => (m.on_hand == null ? '' : h('span', { class: 'pill' + (m.on_hand <= 5 ? ' warn' : '') }, m.on_hand)) },
         { label: '', nowrap: true, get: (m) => h('div', { class: 'row' },
@@ -1073,6 +1232,7 @@ function medForm(s, m, reload) {
     ['dose', 'Dose (e.g. 5 mg, 2 puffs)'],
     ['route', 'Route', 'select', { choices: ROUTES }],
     ['times', 'Scheduled times (e.g. 8:00, 12:30)', 'text', { placeholder: 'empty if only as needed' }],
+    ['days', 'Days it is given (no-school days are skipped)', 'days'],
     ['prn', 'Can be given as needed (PRN)', 'check'],
     ['start_date', 'Start date', 'date'],
     ['end_date', 'End date', 'date'],
@@ -1087,8 +1247,10 @@ function medForm(s, m, reload) {
     ['Cancel', () => dlg.close()],
     ['Save', async () => {
       try {
-        if (m) await post(`/api/meds/${m.id}`, readForm(form));
-        else await post(`/api/students/${s.id}/meds`, readForm(form));
+        const v = readForm(form);
+        if (!v.days) return showErr(err, 'Pick at least one day the medication is given.');
+        if (m) await post(`/api/meds/${m.id}`, v);
+        else await post(`/api/students/${s.id}/meds`, v);
         dlg.close();
         toast('Medication saved');
         reload();
@@ -1098,13 +1260,14 @@ function medForm(s, m, reload) {
 }
 
 // m is a medication row with the student's name and allergies; time is the scheduled slot or null.
-function giveForm(m, time, reload) {
+// day (YYYY-MM-DD) records a dose for another day, at its scheduled time.
+function giveForm(m, time, reload, day = null) {
   const form = formGrid([
     ['status', 'Result', 'select', { choices: STATUSES, default: 'given' }],
     ['dose', 'Dose given'],
     ['given_at', 'Time', 'datetime'],
     ['notes', 'Notes', 'textarea', { rows: 2 }],
-  ], { dose: m.dose || '', given_at: Date.now() });
+  ], { dose: m.dose || '', given_at: day && day !== today() ? new Date(`${day}T${time || '12:00'}`).getTime() : Date.now() });
   const err = errBox();
   const dlg = modal(`${m.name} for ${m.first_name} ${m.last_name}`, [
     m.allergies ? h('div', { class: 'alert bad' }, h('b', {}, 'Allergies: '), m.allergies) : null,
@@ -1402,7 +1565,7 @@ function applyValues(form, list, values) {
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help'], ['feedback', 'Feedback'], ['about', 'About']];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['alerts', 'Medication alerts'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help'], ['feedback', 'Feedback'], ['about', 'About']];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -1413,7 +1576,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp, feedback: setFeedback, about: setAbout })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, alerts: setAlerts, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp, feedback: setFeedback, about: setAbout })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -1845,6 +2008,109 @@ async function setAudit(body, d) {
 
 // Settings > Help: plain-language guide, open to every user.
 // Settings > About: version, the beta notice and the license, for everyone.
+// Settings > Medication alerts: this device for everyone; school-wide timing and
+// no-school days for admins.
+async function setAlerts(body, d, reload) {
+  const a = await get('/api/alerts');
+  const here = h('input', { type: 'checkbox', checked: alertsOnHere() });
+  here.addEventListener('change', () => {
+    try { localStorage.setItem(ALERT_KEY, here.checked ? 'on' : 'off'); } catch { /* private window */ }
+    showAlerts();
+    toast(here.checked ? 'Reminders will show in this window' : 'Reminders hidden in this window');
+  });
+  fill(body,
+    a.on ? null : h('div', { class: 'alert warn' }, 'Medication reminders are turned off for the whole school.', S.user.role === 'admin' ? ' Turn them on below.' : ' An admin can turn them on.'),
+    section('This window',
+      h('label', { class: 'check' }, here, 'Show reminder cards with a chime in this window when a scheduled dose is due'),
+      h('p', { class: 'muted small' }, 'Only on this computer or phone. Each card has Record dose, Snooze 10 min and Dismiss. To stop reminders for one student, untick the box on their Medications tab.')),
+    await phoneSection(a.phones));
+  if (S.user.role !== 'admin') return;
+
+  const m = d.settings.medAlerts;
+  const on = h('input', { type: 'checkbox', checked: m.on });
+  const lead = h('select', { 'aria-label': 'First reminder' }, [[0, 'At the scheduled time'], [5, '5 minutes before'], [10, '10 minutes before'], [15, '15 minutes before'], [30, '30 minutes before']].map(([n, l]) => h('option', { value: n }, l)));
+  const repeat = h('select', { 'aria-label': 'Remind again' }, [[0, 'Don\u2019t remind again'], [10, 'Every 10 minutes'], [15, 'Every 15 minutes'], [30, 'Every 30 minutes']].map(([n, l]) => h('option', { value: n }, l)));
+  lead.value = String(m.lead);
+  repeat.value = String(m.repeat);
+  const win = h('input', { type: 'checkbox', checked: m.windows });
+  const phone = h('input', { type: 'checkbox', checked: m.phone });
+  const save = async () => {
+    try {
+      await post('/api/settings', { medAlerts: { on: on.checked, lead: Number(lead.value), repeat: Number(repeat.value), windows: win.checked, phone: phone.checked } });
+      toast('Saved');
+      pollAlerts();
+    } catch (e) { toast(e.message, true); }
+  };
+  for (const el of [on, lead, repeat, win, phone]) el.addEventListener('change', save);
+  body.append(section('Reminders for the whole school',
+    h('label', { class: 'check' }, on, 'Remind staff when a scheduled dose is due'),
+    h('div', { class: 'grid', style: 'margin-top:10px' },
+      h('div', {}, h('label', {}, 'First reminder'), lead),
+      h('div', {}, h('label', {}, 'If the dose is still not recorded'), repeat)),
+    h('p', { class: 'muted small' }, 'Reminders stop once the dose is recorded (given, refused, absent, held or missed), after 3 repeats, or two hours after the dose time.'),
+    h('label', { class: 'check' }, win, 'Windows notification on this office PC'),
+    h('label', { class: 'check' }, phone, 'Phone notifications for staff who turned them on'),
+    S.remote ? null : h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn', type: 'button', onclick: () => post('/api/alerts/test-windows').then(() => toast('Test sent. It shows at the bottom right of the screen.'), (e) => toast(e.message, true)) }, 'Send a test Windows notification'))));
+
+  const list = h('div', { class: 'noschool' });
+  const rows = (d.settings.noSchool || []).map((c) => ({ ...c }));
+  const draw = () => fill(list,
+    rows.map((c, i) => h('div', { class: 'noschool-row' },
+      h('input', { type: 'date', value: c.from, 'aria-label': 'First day', onchange: (e) => { c.from = e.target.value; if (!c.to || c.to < c.from) { c.to = c.from; draw(); } } }),
+      h('span', { class: 'muted' }, 'to'),
+      h('input', { type: 'date', value: c.to, 'aria-label': 'Last day', onchange: (e) => { c.to = e.target.value; } }),
+      h('input', { type: 'text', value: c.label, maxlength: 60, placeholder: 'e.g. Winter break', 'aria-label': 'Name', onchange: (e) => { c.label = e.target.value; } }),
+      h('button', { class: 'btn small', type: 'button', 'aria-label': 'Remove', onclick: () => { rows.splice(i, 1); draw(); } }, 'Remove'))),
+    rows.length ? null : h('p', { class: 'muted' }, 'No days added yet.'));
+  draw();
+  body.append(section('No-school days',
+    h('p', { class: 'muted small' }, 'Holidays, breaks, snow days and teacher work days. Scheduled medications and reminders skip them, and the Calendar shows them.'),
+    list,
+    h('div', { class: 'row', style: 'margin-top:10px' },
+      h('button', { class: 'btn', type: 'button', onclick: () => { rows.push({ from: today(), to: today(), label: '' }); draw(); list.lastElementChild.querySelector('input').focus(); } }, '+ Add day or break'),
+      h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+        try { await post('/api/settings', { noSchool: rows.filter((c) => c.from) }); toast('No-school days saved'); reload(); } catch (e) { toast(e.message, true); }
+      } }, 'Save no-school days'))));
+}
+
+const b64url = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4)), (c) => c.charCodeAt(0));
+
+// Phone notifications need the app opened on its https address (Settings > Remote access);
+// on iPhone it also has to be added to the home screen first.
+async function phoneSection(phones) {
+  const ok = location.protocol === 'https:' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const count = h('p', { class: 'muted small' }, phones ? `You get notifications on ${phones} phone${phones === 1 ? '' : 's'}.` : 'You have no phone set up for notifications yet.');
+  if (!ok) {
+    return section('Phone notifications', count,
+      h('p', { class: 'muted' }, /iPhone|iPad/.test(navigator.userAgent) && location.protocol === 'https:'
+        ? 'On iPhone, add Nurse\u2019s Log to your home screen first (Share > Add to Home Screen), open it from there, and come back to this page.'
+        : 'Open Nurse\u2019s Log on your phone with its https address (Settings > Remote access on the office PC), sign in, and turn notifications on from this page there.'));
+  }
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  const box = h('div', {});
+  const draw = () => fill(box,
+    h('p', {}, sub ? 'This phone gets medication reminders.' : Notification.permission === 'denied' ? 'Notifications are blocked for this app. Allow them in the phone\u2019s settings, then come back.' : 'This phone does not get reminders yet.'),
+    h('div', { class: 'row' },
+      sub ? h('button', { class: 'btn', type: 'button', onclick: async () => {
+        try { await post('/api/push/unsubscribe', { endpoint: sub.endpoint }); await sub.unsubscribe(); sub = null; toast('Notifications off on this phone'); draw(); } catch (e) { toast(e.message, true); }
+      } }, 'Turn off on this phone')
+        : h('button', { class: 'btn primary', type: 'button', disabled: Notification.permission === 'denied', onclick: async () => {
+          try {
+            if ((await Notification.requestPermission()) !== 'granted') { draw(); return toast('Notifications were not allowed', true); }
+            const { key } = await get('/api/push/key');
+            sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64url(key) });
+            await post('/api/push/subscribe', sub.toJSON());
+            toast('Notifications on for this phone');
+            draw();
+          } catch (e) { toast(e.message, true); }
+        } }, 'Turn on for this phone'),
+      sub ? h('button', { class: 'btn', type: 'button', onclick: () => post('/api/push/test').then(() => toast('Test sent'), (e) => toast(e.message, true)) }, 'Send a test') : null));
+  draw();
+  return section('Phone notifications', box, count,
+    h('p', { class: 'muted small' }, 'Lock screens show only the first name and last initial. Turn reminders off for one student on their Medications tab.'));
+}
+
 function setFeedback(body) {
   const box = h('textarea', { rows: 6, maxlength: 5000, 'aria-label': 'Feedback', placeholder: 'What works, what doesn’t, what you’d like to see…' });
   const btn = h('button', {

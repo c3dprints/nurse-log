@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.18
+
+- Medication reminders: when a scheduled dose is due, Nurse's Log reminds you with a card and a chime in the app window (Record dose, Snooze 10 min, Dismiss), a Windows notification on the office PC, and a notification on phones that turned them on. Reminders stop once the dose is recorded.
+- Timing: in Settings > Medication alerts, admins pick when the first reminder comes (at the dose time or up to 30 minutes before) and how often to remind again while the dose is still not recorded (every 10, 15 or 30 minutes, up to 3 times), and turn reminders, Windows notifications or phone notifications off for the whole school.
+- Turn reminders off for one student with the box on their Medications tab. Each person can also hide reminder cards on their own computer or phone.
+- Phone notifications: open Nurse's Log on the phone with its https address, then Settings > Medication alerts > Turn on for this phone (on iPhone, add it to the home screen first). Lock screens show only the first name and last initial.
+- Days per medication: each medication now has the days of the week it is given. **Medications are given Monday to Friday unless you tick Saturday or Sunday**, so check any medication that is also given on weekends.
+- No-school days: admins add holidays, breaks and snow days in Settings > Medication alerts. Scheduled doses and reminders skip them, and Today says when there is no school.
+- Calendar: a new Calendar page shows each month with the doses due, recorded and not recorded per day, and the no-school days. Click a day to see its doses and record one.
+
 ## 1.0.17
 
 - Audit log is only in Settings > Audit log now (no longer in the main menu).

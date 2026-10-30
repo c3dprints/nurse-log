@@ -194,7 +194,7 @@ tr.click:hover td { background: var(--panel-2); }
 /* Text size: Settings > Appearance and the first-open card */
 .zoom-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .zoom-ctl .zoom-now { min-width: 52px; text-align: center; }
-.zoom-offer { position: fixed; top: 16px; right: 16px; z-index: 55; width: 320px; max-width: calc(100vw / var(--zoom, 1) - 32px); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); padding: 14px 16px; }
+.zoom-offer { position: fixed; bottom: 16px; left: 16px; /* top right is for medication reminders */ z-index: 55; width: 320px; max-width: calc(100vw / var(--zoom, 1) - 32px); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); padding: 14px 16px; }
 .zoom-offer p { margin: 6px 0 10px; }
 .zoom-offer .row { justify-content: flex-end; margin-top: 12px; }
 /* Photos: students and users */
@@ -204,6 +204,38 @@ tr.click:hover td { background: var(--panel-2); }
 .photo-big { display: flex; justify-content: center; margin: 6px 0 12px; }
 .with-photo { display: inline-flex; align-items: center; gap: 10px; }
 .who { display: flex; align-items: center; gap: 10px; }
+/* medication reminders and calendar */
+#med-alerts { position: fixed; top: 16px; right: 16px; z-index: 50; display: flex; flex-direction: column; gap: 8px; width: 340px; max-width: calc(100vw / var(--zoom, 1) - 32px); }
+.med-alert { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); padding: 10px 12px; display: grid; gap: 4px; text-align: left; font: inherit; }
+.med-alert.late { border-left-color: var(--danger); }
+.med-alert.more { cursor: pointer; color: var(--accent); font-weight: 600; }
+.med-alert-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.med-alert .row { margin-top: 6px; flex-wrap: wrap; }
+.days { display: flex; flex-wrap: wrap; gap: 6px; }
+.days .day { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; font-weight: 400; cursor: pointer; }
+.days .day:has(input:checked) { background: var(--accent-2); border-color: var(--accent); }
+.cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.cal-head { font-size: 12px; font-weight: 600; color: var(--muted); text-align: center; padding: 2px 0 4px; }
+.cal-day { min-height: 74px; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.cal-day:hover { border-color: var(--accent); }
+.cal-day.past { background: var(--panel-2); }
+.cal-day.today b { background: var(--accent); color: #fff; border-radius: 99px; padding: 0 7px; }
+.cal-day.on { outline: 2px solid var(--accent); outline-offset: -1px; }
+.cal-day.closed { background: var(--warn-2); }
+.cal-closed { font-size: 12px; color: var(--warn); line-height: 1.2; }
+.cal-count { font-size: 12px; color: var(--muted); line-height: 1.2; }
+.cal-count.ok { color: var(--ok); }
+.cal-count.bad { color: var(--danger); font-weight: 600; }
+.cal-month { min-width: 150px; text-align: center; }
+.noschool { display: grid; gap: 8px; }
+.noschool-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.noschool-row input[type=text] { flex: 1; min-width: 140px; }
+@media (max-width: 760px) {
+  #med-alerts { top: 8px; left: 8px; right: 8px; width: auto; max-width: none; }
+  .cal { gap: 2px; }
+  .cal-day { min-height: 54px; padding: 4px; }
+  .cal-count, .cal-closed { font-size: 10px; }
+}
 #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 6px; max-width: 460px; box-shadow: 0 6px 18px rgba(0,0,0,.2); word-break: break-word; }
 .toast.bad { background: var(--danger); color: #fff; }
