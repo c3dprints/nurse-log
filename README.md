@@ -12,7 +12,7 @@ Needs [Git](https://git-scm.com) and [Node.js 20 LTS](https://nodejs.org). Then 
 irm https://raw.githubusercontent.com/c3dprints/nurse-log/main/scripts/install.ps1 | iex
 ```
 
-(The repo is private, so for now run `scripts\install.ps1` from a clone instead.) It installs to `%LOCALAPPDATA%\NursesLog\app`, checks out the newest release and puts a **Nurse's Log** shortcut on the Desktop. The first launch asks for the school name and the admin account.
+(The repo is private, so that one-liner does not work yet. Instead download **Install-NursesLog.cmd** from the [latest release](https://github.com/c3dprints/nurse-log/releases/latest) and double-click it; Git asks you to sign in to GitHub once.) It installs to `%LOCALAPPDATA%\NursesLog\app`, checks out the newest release and puts a **Nurse's Log** shortcut on the Desktop. The first launch asks for the school name and the admin account.
 
 After setup, an admin should:
 
