@@ -1,0 +1,30 @@
+Nurse's Log
+Copyright (c) 2026 c3dprints. All rights reserved.
+
+PROPRIETARY AND CONFIDENTIAL. BETA SOFTWARE.
+
+This software and its source code are the confidential property of the copyright
+holder. No license is granted to anyone except as given in writing by the
+copyright holder.
+
+Without prior written permission you may not:
+  - copy, distribute, publish, sublicense, sell or rent the software or any part of it;
+  - modify it or make derivative works from it;
+  - reverse engineer, decompile, disassemble or otherwise try to obtain or rebuild
+    its source code or design, except to the extent the law allows despite this term;
+  - remove or change this notice or any copyright notice in the software.
+
+Beta: this is a pre-release version for evaluation and testing only. It has not
+been independently tested, audited or certified and is not licensed for
+production use. Further testing and proper licensing are required before it is
+used to keep real student health records.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING LOSS OF
+DATA, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+Third-party components (exceljs, sql.js, nodemailer, qrcode-generator and their
+dependencies) are open-source software under their own licenses, found in each
+package's folder under node_modules.

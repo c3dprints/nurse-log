@@ -1264,7 +1264,7 @@ function applyValues(form, list, values) {
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help']];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help'], ['about', 'About']];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -1275,7 +1275,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp, about: setAbout })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -1678,6 +1678,25 @@ async function setAudit(body) {
 }
 
 // Settings > Help: plain-language guide, open to every user.
+// Settings > About: version, the beta notice and the license, for everyone.
+function setAbout(body) {
+  body.append(
+    section('Nurse\u2019s Log',
+      h('p', {}, h('b', {}, `Version ${S.version} `), h('span', { class: 'pill warn' }, 'Beta')),
+      h('p', { class: 'muted' }, 'Health records for the school nurse\u2019s office: students, medications and doses, office visits and an audit log.')),
+    section('Beta software',
+      h('div', { class: 'alert warn' },
+        h('p', { style: 'margin-top:0' }, h('b', {}, 'This is a beta (pre-release) version, provided for evaluation and testing only.')),
+        h('p', {}, 'It has not been independently tested, audited or certified, and it is not licensed for production use. Further testing, a security review and proper licensing are required before it is used to keep real student health records.'),
+        h('p', {}, 'Check with your district before use about FERPA, HIPAA and its rules for student health data, and keep any paper or official records your district or state requires.'),
+        h('p', { style: 'margin-bottom:0' }, 'The software is provided \u201Cas is\u201D, without warranty of any kind. The copyright holder is not liable for any loss of data, errors, or decisions made using it.'))),
+    section('License',
+      h('p', {}, '\u00A9 2026 c3dprints. All rights reserved. Proprietary and confidential.'),
+      h('p', { class: 'muted' }, 'No license is granted except in writing. Copying, distributing, modifying, or reverse engineering this software or its source code without written permission is not allowed.'),
+      h('p', { class: 'muted small' }, 'Uses open-source components under their own licenses: exceljs, sql.js, nodemailer and qrcode-generator.')),
+  );
+}
+
 function setHelp(body) {
   const steps = (...items) => h('ol', { class: 'help-steps' }, items.map((i) => h('li', {}, i)));
   const say = (form, text) => h('div', { class: 'help-say' }, h('b', {}, form), h('p', {}, `\u201C${text}\u201D`));

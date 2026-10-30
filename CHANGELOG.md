@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.11
+
+- 
+
 ## 1.0.10
 
 - The taskbar shows the Nurse's Log icon again instead of Edge's. The helper that sets it never actually ran (Windows PowerShell started detached quits at once); the app now asks for it every time the page loads, which also brings the icon back after a reload or an update, when Edge puts its own icon back.

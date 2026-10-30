@@ -341,11 +341,14 @@ function cookieToken(req) {
   return m ? m[1] : null;
 }
 
-const setCookie = (token) => ({ 'Set-Cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/` });
+// Over the HTTPS address (Tailscale Serve) cookies are also marked Secure, so the
+// browser never sends them over plain http.
+const secure = (req) => (req && viaServe(req) ? '; Secure' : '');
+const setCookie = (token, req) => ({ 'Set-Cookie': `${COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/${secure(req)}` });
 const clearCookie = { 'Set-Cookie': `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` };
 
 // A phone that stays signed in keeps this cookie for 30 days; the PIN unlocks it.
-const deviceCookie = (token) => `nl_device=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}`;
+const deviceCookie = (token, req) => `nl_device=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${30 * 86400}${secure(req)}`;
 const clearDeviceCookie = 'nl_device=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0';
 function deviceToken(req) {
   const m = /(?:^|;\s*)nl_device=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
@@ -462,7 +465,7 @@ route('GET', '/api/remote/qr', async ({ query }) => {
   return { url: query.url, rows };
 });
 
-route('POST', '/api/setup', { open: true }, ({ body, res }) => {
+route('POST', '/api/setup', { open: true }, ({ body, res, req }) => {
   if (!auth.needsSetup()) throw fail(400, 'setup is already done');
   let made;
   try {
@@ -473,34 +476,56 @@ route('POST', '/api/setup', { open: true }, ({ body, res }) => {
   if (body.schoolName) db.setSetting('schoolName', String(body.schoolName).trim().slice(0, 120));
   db.run('UPDATE users SET last_login = ? WHERE id = ?', [Date.now(), made.user.id]);
   db.audit(made.user, 'setup', { details: 'first admin account created' });
-  res.extraHeaders = setCookie(auth.startSession(made.user.id));
+  res.extraHeaders = setCookie(auth.startSession(made.user.id), req);
   return { user: auth.publicUser(made.user), recovery: made.recovery };
 });
 
+// Wrong passwords, PINs and reset codes from one address: after 30 in 15 minutes
+// that address has to wait, so nobody can keep locking nurses out or guessing codes.
+const MISS_MAX = 30;
+const MISS_MS = 15 * 60 * 1000;
+const misses = new Map();
+function checkMisses(req) {
+  const now = Date.now();
+  for (const [k, v] of misses) if (now - v.since > MISS_MS) misses.delete(k);
+  const m = misses.get(clientIp(req));
+  if (m && m.n >= MISS_MAX) throw fail(429, `too many wrong tries from this device, wait ${Math.ceil((m.since + MISS_MS - now) / 60000)} min`);
+}
+function miss(req) {
+  const ip = clientIp(req);
+  const m = misses.get(ip) || { n: 0, since: Date.now() };
+  m.n++;
+  misses.set(ip, m);
+}
+
 route('POST', '/api/login', { open: true }, ({ body, res, req }) => {
+  checkMisses(req);
   const r = auth.login(body.username, body.password);
   const from = isRemote(req) ? { from: `Tailscale ${clientIp(req)}${viaServe(req) ? ' (https)' : ''}` } : null;
   if (r.error) {
     if (r.user) db.audit(r.user, 'login.failed', { details: { error: r.error, ...from } });
+    miss(req);
     throw fail(401, r.error);
   }
   db.audit(r.user, 'login', { details: from });
-  res.extraHeaders = setCookie(r.token);
+  res.extraHeaders = setCookie(r.token, req);
   return { user: auth.publicUser(r.user) };
 });
 
 // Unlocks a remembered phone with its PIN.
 route('POST', '/api/login/pin', { open: true }, ({ body, res, req }) => {
   if (!pinAllowed(req)) throw fail(400, 'PIN sign-in is not available here; use your password');
+  checkMisses(req);
   const r = auth.pinLogin(deviceToken(req), body.pin);
   const from = `Tailscale ${clientIp(req)}${viaServe(req) ? ' (https)' : ''}`;
   if (r.error) {
     if (r.device) db.audit(r.device.user, r.forgotten ? 'device.locked' : 'login.pin-failed', { details: { device: r.device.name, from } });
     if (r.forgotten) res.extraHeaders = { 'Set-Cookie': clearDeviceCookie };
+    miss(req);
     throw fail(401, r.error);
   }
   db.audit(r.user, 'login', { details: { method: 'PIN', device: r.device.name, from } });
-  res.extraHeaders = setCookie(r.token);
+  res.extraHeaders = setCookie(r.token, req);
   return { user: auth.publicUser(r.user) };
 });
 
@@ -513,7 +538,7 @@ route('POST', '/api/device/remember', ({ body, user, req, res }) => {
   const old = auth.device(deviceToken(req));
   if (old) auth.forgetDevice(old.id, old.user_id);
   db.audit(user, 'device.remember', { details: { device: name, from: `Tailscale ${clientIp(req)}` } });
-  res.extraHeaders = { 'Set-Cookie': deviceCookie(made.token) };
+  res.extraHeaders = { 'Set-Cookie': deviceCookie(made.token, req) };
   return { device: { name, username: user.username, fullName: user.full_name } };
 });
 
@@ -547,7 +572,8 @@ route('POST', '/api/logout', { open: true }, ({ user, token, body, res }) => {
 });
 
 // Same answer whether or not the account exists, so the form cannot be used to find usernames.
-route('POST', '/api/reset/request', { open: true }, async ({ body }) => {
+route('POST', '/api/reset/request', { open: true }, async ({ body, req }) => {
+  checkMisses(req);
   const smtp = db.setting('smtp', {});
   if (!mailer.configured(smtp)) return { sent: false, emailReady: false };
   const u = auth.byLogin(body.login);
@@ -565,15 +591,17 @@ route('POST', '/api/reset/request', { open: true }, async ({ body }) => {
   return { sent: true, emailReady: true };
 });
 
-route('POST', '/api/reset/finish', { open: true }, ({ body }) => {
+route('POST', '/api/reset/finish', { open: true }, ({ body, req }) => {
+  checkMisses(req);
   const u = auth.byLogin(body.login);
-  if (!u) throw fail(400, 'code is wrong or expired');
+  if (!u) { miss(req); throw fail(400, 'code is wrong or expired'); }
   let how;
   try {
     how = auth.useResetCode(u.id, body.code);
     auth.setPassword(u.id, body.password);
   } catch (e) {
     db.audit(u, 'password.reset-failed', { details: e.message });
+    if (/code/.test(e.message)) miss(req);
     throw fail(400, e.message);
   }
   auth.endSessionsFor(u.id);
@@ -745,6 +773,10 @@ route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
   }
   if ('exportFolder' in body) {
     const f = String(body.exportFolder || '').trim();
+    // A phone could otherwise send every record to another computer without a download.
+    if (isRemote(req) && f !== db.setting('exportFolder', '')) throw fail(400, 'change the Save to folder location from the office PC');
+    // Network paths (\\server\share) are refused: just checking one makes Windows send its sign-in to that server.
+    if (f && !/^[A-Za-z]:\\/.test(f)) throw fail(400, 'pick a folder on this PC\u2019s drives, such as C:\\Nurse records (map a network share to a drive letter first)');
     if (f && !fs.existsSync(f)) throw fail(400, `folder not found: ${f}`);
     db.setSetting('exportFolder', f);
     changed.exportFolder = f;
@@ -900,7 +932,7 @@ async function handle(req, res) {
   } catch (e) {
     const code = Number.isInteger(e.code) && e.code >= 400 && e.code < 600 ? e.code : 500;
     if (code === 500) log(`${req.method} ${url.pathname}: ${e.stack || e.message}`);
-    send(res, code, { error: code === 500 ? `something went wrong: ${e.message}` : e.message }, undefined, res.extraHeaders || {});
+    send(res, code, { error: code === 500 ? 'something went wrong; the details are in the Nurse\u2019s Log log file' : e.message }, undefined, res.extraHeaders || {});
   }
 }
 

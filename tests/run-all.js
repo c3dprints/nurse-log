@@ -79,6 +79,16 @@ async function unit() {
     assert.strictEqual(auth.devices(admin.id).length, 0);
   });
 
+  await test('reset codes: wrong guesses add up across new codes', () => {
+    for (let i = 0; i < 2; i++) {
+      auth.makeResetCode(admin.id);
+      for (let j = 0; j < 5; j++) assert.throws(() => auth.useResetCode(admin.id, '000000'), /wrong or expired/);
+    }
+    const code = auth.makeResetCode(admin.id);
+    assert.throws(() => auth.useResetCode(admin.id, code), /too many wrong codes/, 'even the right code waits after 10 wrong ones');
+    db.run('DELETE FROM reset_codes WHERE user_id = ?', [admin.id]);
+  });
+
   await test('sessions expire when idle', () => {
     const t = auth.startSession(admin.id);
     assert(auth.session(t));
@@ -240,11 +250,11 @@ function fakeOpenAI() {
 const TS_IP = '127.0.0.2'; // stands in for this PC's Tailscale address
 const TS_DNS = 'nurse-pc.tail-test.ts.net';
 let cookie = '';
-function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1' } = {}) {
+function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1', from } = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const r = http.request({
-      host: ip, port: PORT, path: url, method,
+      host: ip, port: PORT, path: url, method, localAddress: from,
       headers: {
         Host: `${ip}:${PORT}`,
         ...(method === 'POST' ? { 'Content-Type': 'application/json', 'X-Nurse-Log': '1' } : {}),
@@ -540,6 +550,18 @@ async function httpTests() {
       assert.doesNotMatch(cookie, /nl_device=/, 'the forgotten cookie is cleared');
       cookie = pcCookie;
       assert.strictEqual((await req('POST', '/api/settings', { remoteAccess: false })).status, 200);
+    });
+
+    await test('http: wrong sign-ins from one address are slowed; save folder must be a local drive', async () => {
+      assert.match((await req('POST', '/api/settings', { exportFolder: '\\\\attacker\\share' })).json.error, /this PC/);
+      const saved = cookie;
+      cookie = '';
+      let last;
+      for (let i = 0; i < 31; i++) last = await req('POST', '/api/login', { username: 'nobody-here', password: 'wrong password 1' }, { from: '127.0.0.3' });
+      assert.strictEqual(last.status, 429);
+      assert.match(last.json.error, /too many wrong tries/);
+      assert.strictEqual((await req('POST', '/api/login', { username: 'nobody-here', password: 'x' })).status, 401, 'other addresses are not affected');
+      cookie = saved;
     });
 
     await test('http: static files', async () => {
