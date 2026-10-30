@@ -380,6 +380,7 @@ route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   emailReady: mailer.configured(db.setting('smtp', {})), idleMinutes: db.setting('idleMinutes', 15),
   exportFolder: user ? db.setting('exportFolder', '') : '',
   theme: user ? db.setting(`theme:${user.id}`, 'system') : null,
+  dictateKey: user ? db.setting(`dictateKey:${user.id}`, DEFAULT_DICTATE_KEY) : null,
   remote: isRemote(req),
   aiReady: user ? ai.configured(aiSettings()) : false,
 }));
@@ -568,6 +569,27 @@ route('POST', '/api/account/theme', { allowMustChange: true }, ({ body, user }) 
   return { theme: body.theme };
 });
 
+// Each user's own key for starting and stopping dictation, like "F2" or "Ctrl+Shift+M".
+// Keys the browser or Windows keep for themselves are refused.
+const DEFAULT_DICTATE_KEY = 'F2';
+const RESERVED_KEYS = new Set(['F1', 'F3', 'F5', 'F6', 'F7', 'F10', 'F11', 'F12', 'Ctrl+A', 'Ctrl+C', 'Ctrl+V', 'Ctrl+X', 'Ctrl+Z', 'Ctrl+Y',
+  'Ctrl+S', 'Ctrl+P', 'Ctrl+F', 'Ctrl+W', 'Ctrl+T', 'Ctrl+N', 'Ctrl+R', 'Ctrl+L', 'Ctrl+Q', 'Ctrl+H', 'Ctrl+J', 'Ctrl+D', 'Ctrl+F4', 'Ctrl+F5',
+  'Alt+F4', 'Alt+Space', 'Ctrl+Shift+I', 'Ctrl+Shift+J', 'Ctrl+Shift+C', 'Ctrl+Shift+N', 'Ctrl+Shift+T', 'Ctrl+Shift+W', 'Ctrl+Shift+Q', 'Ctrl+Shift+R', 'Ctrl+Shift+Delete']);
+function checkShortcut(k) {
+  const m = /^(Ctrl\+)?(Alt\+)?(Shift\+)?([A-Z0-9]|Space|F(?:[1-9]|1[0-2]))$/.exec(String(k || ''));
+  if (!m) return 'use a letter, number, Space or F1 to F12, with Ctrl, Alt or Shift if you like';
+  if (!m[1] && !m[2] && !/^F/.test(m[4])) return 'add Ctrl or Alt, or use an F key, so typing never sets it off';
+  if (RESERVED_KEYS.has(k)) return `${k} is already used by the browser or Windows`;
+  return null;
+}
+route('POST', '/api/account/shortcut', ({ body, user }) => {
+  const key = body.key === 'default' ? DEFAULT_DICTATE_KEY : String(body.key || '');
+  const bad = checkShortcut(key);
+  if (bad) throw fail(400, bad);
+  db.setSetting(`dictateKey:${user.id}`, key);
+  return { dictateKey: key };
+});
+
 route('POST', '/api/account/recovery', { allowMustChange: true }, ({ body, user }) => {
   if (!verify(body.password, user.pass_hash)) throw fail(400, 'password is wrong');
   const code = auth.newRecoveryCode(user.id);
@@ -714,6 +736,12 @@ route('POST', '/api/ai/fill', { maxBody: MAX_AUDIO_BODY }, async ({ body, user, 
     if (buf.length < 1000) throw fail(400, 'that recording was too short');
     const mime = /^audio\/(webm|ogg|mp4|mpeg|wav)/.test(body.mime || '') ? body.mime.split(';')[0] : 'audio/webm';
     transcript = await ai.transcribe(a, buf, mime);
+  }
+  // Dictating into one box: only the words are needed, ChatGPT does not fill the form.
+  if (body.only === 'transcribe') {
+    if (!body.audio) throw fail(400, 'nothing was recorded');
+    db.audit(user, 'ai.transcribe', { studentId: Number(body.studentId) || null, details: { form: body.form || null, field: String(body.field || '').slice(0, 80), model: a.transcribeModel } });
+    return { transcript, values: {} };
   }
   const notes = [String(body.notes || '').trim(), transcript].filter(Boolean).join('\n').slice(0, 20000);
   if (!notes) throw fail(400, 'nothing was heard; try again a little closer to the microphone');

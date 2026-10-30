@@ -305,3 +305,21 @@ tr.click:hover td { background: var(--panel-2); }
 .qr-row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
 .qr { text-align: center; }
 .qr svg { display: block; border-radius: 8px; border: 1px solid var(--line); }
+
+/* where dictation goes: the clicked box lights up */
+.namerow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.kbd { font: 12px Consolas, monospace; background: var(--panel-2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; }
+.grid > div:has(> input:is([type=text], [type=tel], [type=number], [type=search], [type=email]):focus, > textarea:focus),
+.grid > div.dict-target {
+  background: var(--accent-2); border-radius: 10px; box-shadow: 0 0 0 6px var(--accent-2);
+}
+.grid > div:has(> input:is([type=text], [type=tel], [type=number], [type=search], [type=email]):focus, > textarea:focus) > label,
+.grid > div.dict-target > label { color: var(--accent); font-weight: 600; }
+.grid > div:has(> input:is([type=text], [type=tel], [type=number], [type=search], [type=email]):focus, > textarea:focus) > label::after,
+.grid > div.dict-target > label::after { content: "  \1F3A4  dictation goes here"; font-weight: 400; }
+.grid > div.dictating { animation: dictating 1.2s ease-in-out infinite; }
+.grid > div.dictating > label::after { content: "  \1F534  listening\2026"; }
+@keyframes dictating { 50% { box-shadow: 0 0 0 6px var(--accent-2), 0 0 0 9px var(--accent); } }
+@media (prefers-reduced-motion: reduce) { .grid > div.dictating { animation: none; box-shadow: 0 0 0 6px var(--accent-2), 0 0 0 8px var(--accent); } }
+.settings-log .head h1 { font-size: 16px; }
+.settings-log .panel { box-shadow: none; border: 0; padding: 0; }

@@ -391,10 +391,28 @@ async function httpTests() {
       assert.strictEqual(audit.length, 2);
       assert(!audit[0].details.includes('Jane'), 'audit lists field names, not what was said');
 
+      const before = openai.seen.length;
+      const box = await req('POST', '/api/ai/fill', { audio: Buffer.alloc(4000, 7).toString('base64'), only: 'transcribe', form: 'Student info', field: 'Guardian phone', studentId: sid, fields });
+      assert.match(box.json.transcript, /Jane Smith/);
+      assert.deepStrictEqual(box.json.values, {});
+      assert.deepStrictEqual(openai.seen.slice(before).map((x) => x.url), ['/v1/audio/transcriptions'], 'one box: no ChatGPT form fill');
+      assert.match((await req('POST', '/api/ai/fill', { only: 'transcribe', notes: 'x', fields })).json.error, /nothing was recorded/);
+
       await req('POST', '/api/settings', { ai: { key: 'sk-wrong' } });
       assert.match((await req('POST', '/api/ai/fill', { notes: 'x', fields })).json.error, /rejected the API key/);
       await req('POST', '/api/settings', { ai: { enabled: false, clearKey: true } });
       assert.strictEqual((await req('GET', '/api/settings')).json.settings.ai.hasKey, false);
+    });
+
+    await test('http: each user picks a dictation key, browser keys refused', async () => {
+      assert.strictEqual((await req('GET', '/api/state')).json.dictateKey, 'F2');
+      assert.strictEqual((await req('POST', '/api/account/shortcut', { key: 'Ctrl+Shift+M' })).json.dictateKey, 'Ctrl+Shift+M');
+      assert.strictEqual((await req('GET', '/api/state')).json.dictateKey, 'Ctrl+Shift+M');
+      for (const bad of ['M', 'Ctrl+C', 'F5', 'Alt+F4', 'Ctrl+Shift+I', 'Ctrl+Shift+', 'Win+M', '']) {
+        assert.strictEqual((await req('POST', '/api/account/shortcut', { key: bad })).status, 400, bad);
+      }
+      assert.strictEqual((await req('POST', '/api/account/shortcut', { key: 'F9' })).status, 200);
+      assert.strictEqual((await req('POST', '/api/account/shortcut', { key: 'default' })).json.dictateKey, 'F2');
     });
 
     await test('http: guardian phone over 10 digits is refused', async () => {

@@ -275,7 +275,7 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 
 // ---- app state and routing ------------------------------------------------------
 
-const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false };
+const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false, dictateKey: 'F2', board: null };
 const $app = document.getElementById('app');
 
 // [key, name, kind, swatch colors: background, panel, accent, style]
@@ -315,7 +315,7 @@ async function loadState() {
   if (st.theme) applyTheme(st.theme);
   Object.assign(S, {
     user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady,
-    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady,
+    idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady, dictateKey: st.dictateKey || 'F2',
   });
 }
 
@@ -699,11 +699,13 @@ async function viewStudent(main, r) {
   const s = b.student;
   const tab = STUDENT_TABS.includes(r.tab) ? r.tab : 'info';
   const reload = () => viewStudent(main, { ...r, tab });
+  S.board = { s, reload };
   const tabBtn = (key, label) => h('button', { class: 'tab' + (tab === key ? ' on' : ''), type: 'button', onclick: () => go(`#/student/${s.id}/${key}`) }, label);
   const body = h('div', {});
   fill(main, 
     h('div', { class: 'head' },
-      h('div', {}, h('h1', {}, `${s.first_name} ${s.last_name}`),
+      h('div', {}, h('div', { class: 'namerow' }, h('h1', {}, `${s.first_name} ${s.last_name}`),
+        h('button', { class: 'btn small', type: 'button', title: 'Edit student info', 'aria-label': `Edit ${s.first_name} ${s.last_name}`, onclick: () => studentForm(s, reload) }, '✎ Edit')),
         h('div', { class: 'muted' }, [s.student_no && `ID ${s.student_no}`, s.grade && `Grade ${s.grade}`, s.homeroom, s.dob && `DOB ${s.dob} (${age(s.dob)})`].filter(Boolean).join(' \u00B7 '))),
       s.archived ? h('span', { class: 'pill warn' }, 'Archived') : null,
       h('div', { class: 'grow' }),
@@ -939,14 +941,16 @@ const viewAudit = (main) => logView(main, { title: 'Audit log', kind: 'audit', u
 
 const MAX_RECORD_SECONDS = 180;
 
-// The Dictate bar above a form: record or type notes, ChatGPT fills the boxes.
-// fields is the same list given to formGrid; values land in the form for the
-// nurse to check, nothing is saved here.
+// The Dictate bar above a form. Click a box first and dictation types into that
+// box; with no box picked, ChatGPT reads the notes and fills the whole form.
+// fields is the same list given to formGrid; nothing is saved here.
+const TYPABLE = 'input[type=text], input[type=tel], input[type=number], input[type=search], textarea';
+
 function assistBar(form, fields, { form: formName, studentId } = {}) {
   if (!S.aiReady) {
     return h('p', { class: 'muted small assist-tip' }, S.remote
-      ? 'Tip: use the microphone key on your keyboard to dictate into any box.'
-      : 'Tip: press the Windows key + H to dictate into any box.',
+      ? 'Tip: tap a box, then use the microphone key on your keyboard to dictate into it.'
+      : 'Tip: click a box (it lights up), then press the Windows key + H to dictate into it.',
     S.user.role === 'admin' && !S.remote ? [' ', h('a', { href: '#/settings/ai' }, 'Set up ChatGPT to fill in the form for you.')] : null);
   }
   const list = fields.filter(([name, , type]) => name && type !== 'datetime' && type !== 'heading' && type !== 'password')
@@ -959,8 +963,35 @@ function assistBar(form, fields, { form: formName, studentId } = {}) {
     h('div', { class: 'row', style: 'margin-top:6px' }, h('button', { class: 'btn small primary', type: 'button', onclick: () => send({ notes: notes.value }) }, 'Fill in the form')));
   let rec = null;
   let timer = null;
-  const mic = h('button', { class: 'btn small primary', type: 'button', onclick: () => (rec ? rec.stop() : start()) }, '\u{1F3A4} Dictate');
+  let target = null; // the box picked by clicking it, or null for the whole form
+  let recTarget = null;
+  const where = h('span', { class: 'assist-where' });
+  const mic = h('button', { class: 'btn small primary', type: 'button', onclick: () => toggle() }, '\u{1F3A4} Dictate');
   const busy = (on) => { mic.disabled = on; for (const b of typed.querySelectorAll('button')) b.disabled = on; };
+  const fieldOf = (el) => list.find((f) => f.name === el.name);
+  const boxOf = (el) => el && el.closest('.grid > div');
+
+  function pick(el) {
+    if (target === el) return;
+    if (target) boxOf(target)?.classList.remove('dict-target');
+    target = el;
+    if (el) boxOf(el)?.classList.add('dict-target');
+    showWhere();
+  }
+  function showWhere() {
+    const f = target && fieldOf(target);
+    where.replaceChildren(...(f
+      ? ['Dictating into ', h('b', {}, f.label), ' \u00B7 ', h('button', { class: 'linkbtn', type: 'button', onclick: () => pick(null) }, 'fill the whole form instead')]
+      : ['Click a box to dictate into it, or dictate now to fill the whole form.']));
+  }
+  form.addEventListener('focusin', (e) => { if (e.target.matches(TYPABLE) && fieldOf(e.target)) pick(e.target); });
+  showWhere();
+
+  function toggle() {
+    if (!canRecord) { status.textContent = 'This device cannot record here; use Type notes.'; return; }
+    if (mic.disabled) return;
+    if (rec) rec.stop(); else start();
+  }
 
   async function start() {
     let stream;
@@ -970,6 +1001,8 @@ function assistBar(form, fields, { form: formName, studentId } = {}) {
     }
     const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
     const chunks = [];
+    recTarget = target;
+    if (recTarget) boxOf(recTarget)?.classList.add('dictating');
     rec = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
     rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
     rec.onstop = async () => {
@@ -981,18 +1014,39 @@ function assistBar(form, fields, { form: formName, studentId } = {}) {
       mic.classList.remove('danger');
       const blob = new Blob(chunks, { type });
       const audio = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(',')[1] || ''); r.readAsDataURL(blob); });
-      send({ audio, mime: type, notes: notes.value });
+      if (recTarget) intoBox(recTarget, { audio, mime: type });
+      else send({ audio, mime: type, notes: notes.value });
     };
     rec.start(1000);
     const began = Date.now();
     mic.textContent = '\u25A0 Stop';
     mic.classList.add('danger');
-    status.textContent = 'Listening\u2026 speak naturally, then press Stop.';
+    status.textContent = `Listening\u2026 press Stop (or ${S.dictateKey}) when done.`;
     timer = setInterval(() => {
       const sec = Math.round((Date.now() - began) / 1000);
       status.textContent = `Listening\u2026 ${Math.floor(sec / 60)}:${p2(sec % 60)}`;
       if (sec >= MAX_RECORD_SECONDS && rec) rec.stop();
     }, 500);
+  }
+
+  // Dictation into the picked box: the words go in where the cursor was.
+  async function intoBox(el, payload) {
+    const f = fieldOf(el);
+    busy(true);
+    status.textContent = 'Turning speech into text\u2026';
+    try {
+      const r = await post('/api/ai/fill', { ...payload, only: 'transcribe', form: formName, field: f.label, studentId, fields: list });
+      if (!r.transcript) { status.textContent = 'Nothing was heard; try again a little closer to the microphone.'; return; }
+      insertText(el, r.transcript, f.type);
+      boxOf(el)?.classList.add('ai-filled');
+      status.textContent = `Added to ${f.label}. Check it before saving.`;
+      el.focus();
+    } catch (e) {
+      status.textContent = e.message;
+    } finally {
+      boxOf(el)?.classList.remove('dictating');
+      busy(false);
+    }
   }
 
   async function send(payload) {
@@ -1010,13 +1064,59 @@ function assistBar(form, fields, { form: formName, studentId } = {}) {
     } finally { busy(false); }
   }
 
-  return h('div', { class: 'assist' },
+  const bar = h('div', { class: 'assist' },
     h('div', { class: 'row' }, canRecord ? mic : null,
       h('button', { class: 'btn small', type: 'button', onclick: () => typed.classList.toggle('hidden') }, 'Type notes'),
       status, h('div', { class: 'grow' }),
       h('a', { class: 'small', href: '#/settings/help', target: '_blank', title: 'Opens the help in a new window so this form stays open' }, 'How to use')),
+    canRecord ? h('div', { class: 'small muted', style: 'margin-top:6px' }, where) : null,
     typed, heard);
+  bar.nlToggle = toggle; // for the dictation shortcut key
+  return bar;
 }
+
+// Puts dictated words into one box at the cursor. Phone boxes keep only digits.
+function insertText(el, text, type) {
+  let t = String(text).trim();
+  if (el.tagName !== 'TEXTAREA') t = t.replace(/[.\u3002]+$/, '');
+  if (type === 'tel') { el.value = fmtPhone(el.value + t); return; }
+  if (type === 'number') { const n = (t.match(/-?\d+(?:\.\d+)?/) || [])[0]; if (n) el.value = n; return; }
+  const start = el.selectionStart ?? el.value.length;
+  const end = el.selectionEnd ?? start;
+  const before = el.value.slice(0, start);
+  el.setRangeText((before && !/\s$/.test(before) ? ' ' : '') + t, start, end, 'end');
+}
+
+// ---- dictation shortcut ------------------------------------------------------------
+
+// "Ctrl+Shift+M" from a key press, or null for keys that cannot be a shortcut.
+function comboOf(e) {
+  const c = e.code || '';
+  const k = /^Key[A-Z]$/.test(c) ? c.slice(3) : /^Digit\d$/.test(c) ? c.slice(5) : c === 'Space' ? 'Space' : /^F\d{1,2}$/.test(c) ? c : null;
+  if (!k) return null;
+  return [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', k].filter(Boolean).join('+');
+}
+
+const NO_AI_HINT = 'Dictation with ChatGPT is not set up. Click a box and press the Windows key + H instead.';
+
+// The user's key starts or stops dictation on the open form. On a student's page
+// with no form open it opens Edit info and starts listening.
+document.addEventListener('keydown', (e) => {
+  if (!S.user || !S.dictateKey || e.repeat || (e.target.closest && e.target.closest('.key-capture'))) return;
+  if (comboOf(e) !== S.dictateKey) return;
+  e.preventDefault();
+  const bar = [...document.querySelectorAll('.overlay .assist')].pop();
+  if (bar && bar.nlToggle) return bar.nlToggle();
+  if (document.querySelector('.overlay .assist-tip')) return toast(NO_AI_HINT);
+  if (document.querySelector('.overlay')) return;
+  if (S.board && route().name === 'student') {
+    studentForm(S.board.s, S.board.reload);
+    const opened = [...document.querySelectorAll('.overlay .assist')].pop();
+    if (opened && opened.nlToggle) opened.nlToggle(); else toast(NO_AI_HINT);
+    return;
+  }
+  toast(`Open a student or a form first, then press ${S.dictateKey} to dictate.`);
+});
 
 // Puts suggested values into the form and highlights them. A note added to a
 // box that already has text is appended, so nothing typed earlier is lost.
@@ -1047,7 +1147,7 @@ function applyValues(form, list, values) {
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates']] : []), ['help', 'Help']];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help']];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -1058,7 +1158,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, help: setHelp })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -1090,10 +1190,44 @@ function setAccount(body) {
         err2.classList.add('hidden');
       } catch (e) { showErr(err2, e.message); }
     } }, 'Change password'))),
+    shortcutSection(),
     section('Recovery code', h('p', { class: 'muted' }, 'Makes a new recovery code for resetting your password without email. The old code stops working. Enter your password to confirm.'),
       err3, h('div', { class: 'row' }, rpw, h('button', { class: 'btn', onclick: async () => {
         try { const r = await post('/api/account/recovery', { password: rpw.value }); rpw.value = ''; showRecovery(r.recovery, () => {}, true); } catch (e) { showErr(err3, e.message); }
       } }, 'Make new code'))));
+}
+
+// Settings > My account: the key that starts and stops dictation.
+function shortcutSection() {
+  const err = errBox();
+  const shown = h('kbd', { class: 'kbd' }, S.dictateKey);
+  const cap = h('input', { type: 'text', class: 'key-capture', readonly: true, placeholder: 'Click here, then press the keys', style: 'max-width:260px' });
+  let picked = null;
+  cap.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') return;
+    e.preventDefault();
+    const k = comboOf(e);
+    if (k) { picked = k; cap.value = k; err.classList.add('hidden'); }
+  });
+  const save = async (key) => {
+    try {
+      const r = await post('/api/account/shortcut', { key });
+      S.dictateKey = r.dictateKey;
+      shown.textContent = r.dictateKey;
+      cap.value = '';
+      picked = null;
+      err.classList.add('hidden');
+      toast(`Dictation key: ${r.dictateKey}`);
+    } catch (e) { showErr(err, e.message); }
+  };
+  return section('Dictation shortcut',
+    h('p', { class: 'muted' }, 'Press ', shown, ' to start dictating on an open form, and again to stop. If you clicked a box first, the words go into that box; otherwise ChatGPT fills the whole form. On a student\u2019s page it opens Edit info and starts listening.'),
+    S.aiReady ? null : h('p', { class: 'muted small' }, 'Dictation with ChatGPT is not turned on yet, so the key does nothing until an admin sets it up.'),
+    err,
+    h('div', { class: 'row' }, cap,
+      h('button', { class: 'btn primary', type: 'button', onclick: () => (picked ? save(picked) : showErr(err, 'click the box and press the keys you want first')) }, 'Use this key'),
+      h('button', { class: 'btn', type: 'button', onclick: () => save('default') }, 'Back to F2')),
+    h('p', { class: 'muted small' }, 'Good choices: an F key like F2, F4, F8 or F9, or Ctrl+Shift with a letter (like Ctrl+Shift+M). Keys the browser uses, like Ctrl+C or F5, cannot be picked.'));
 }
 
 const FIREWALL_CMD = 'New-NetFirewallRule -DisplayName "Nurse\'s Log over Tailscale" -Direction Inbound -Protocol TCP -LocalPort 8940 -RemoteAddress 100.64.0.0/10 -Action Allow';
@@ -1389,6 +1523,13 @@ function setAi(body, d, reload) {
       h('p', { class: 'muted' }, 'Windows has free dictation built in: click in any box and press the Windows key + H. On a phone, use the microphone key on the keyboard.')));
 }
 
+// Settings > Audit log: the same log as in the sidebar, inside Settings for admins.
+async function setAudit(body) {
+  const box = h('div', { class: 'settings-log' });
+  body.append(h('p', { class: 'muted' }, 'Every sign-in, view, change, export, dictation and setting change, with who and when. Export it to Excel from here too.'), box);
+  await viewAudit(box);
+}
+
 // Settings > Help: plain-language guide, open to every user.
 function setHelp(body) {
   const steps = (...items) => h('ol', { class: 'help-steps' }, items.map((i) => h('li', {}, i)));
@@ -1406,11 +1547,13 @@ function setHelp(body) {
     section('Using it, step by step',
       steps(
         ['Open a form: ', h('b', {}, 'Add student'), ' or ', h('b', {}, 'Edit info'), ' on a student, ', h('b', {}, 'Add medication'), ', or ', h('b', {}, 'New visit'), '.'],
-        ['Press ', h('b', {}, '\u{1F3A4} Dictate'), ' at the top of the form. The first time, Windows or Chrome asks to use the microphone; choose ', h('b', {}, 'Allow'), '.'],
+        ['To fill one box, click it first: it lights up with \u201C\u{1F3A4} dictation goes here\u201D and your words go into that box. To fill the whole form, don\u2019t pick a box (or press \u201Cfill the whole form instead\u201D).'],
+        ['Press ', h('b', {}, '\u{1F3A4} Dictate'), ' or your shortcut key (', h('kbd', { class: 'kbd' }, S.dictateKey), ', change it in Settings > My account). The first time, Windows or Chrome asks to use the microphone; choose ', h('b', {}, 'Allow'), '.'],
         'Talk naturally, as if telling a colleague. A timer shows it is listening (up to 3 minutes).',
-        ['Press ', h('b', {}, '\u25A0 Stop'), '. After a few seconds the boxes fill in and are outlined.'],
+        ['Press ', h('b', {}, '\u25A0 Stop'), ' (or the shortcut key again). After a few seconds the words appear and the filled boxes are outlined.'],
         ['Check every outlined box. Open ', h('b', {}, 'What was heard'), ' to see the words it picked up.'],
         ['Fix anything that is wrong, then press ', h('b', {}, 'Save'), '.']),
+      h('p', { class: 'muted' }, 'Shortcut: on a student\u2019s page, press ', h('kbd', { class: 'kbd' }, S.dictateKey), ' with no form open and Edit info opens already listening.'),
       h('p', { class: 'muted' }, 'Prefer typing or pasting? Press ', h('b', {}, 'Type notes'), ', type or paste (for example from a doctor\u2019s note), then press ', h('b', {}, 'Fill in the form'), '.')),
 
     section('What to say',

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.8
+
+- Edit button next to the student's name on the student page opens Edit info in one click.
+- Click a box and it lights up with "dictation goes here", so it is clear where Windows key + H or ChatGPT dictation will type. With ChatGPT on, dictating with a box picked puts the words into that box at the cursor (phone boxes keep 10 digits); with no box picked, ChatGPT fills the whole form as before. The box pulses while listening.
+- Dictation shortcut: each user picks their own key in Settings > My account (F2 by default). It starts and stops dictation on an open form; on a student's page with no form open it opens Edit info and starts listening. Keys the browser or Windows use (Ctrl+C, F5, Alt+F4...) cannot be picked.
+- Audit log is also in Settings (admins), next to the sidebar link.
+- Dictation into a single box is audited as ai.transcribe with the box's name.
+
 ## 1.0.7
 
 Easier phone setup.
