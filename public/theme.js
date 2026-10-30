@@ -7,5 +7,5 @@ try {
   if (localStorage.getItem('nl.style') === 'material') document.documentElement.setAttribute('data-style', 'material');
   // Text size picked on this PC (Settings > Appearance); phones use pinch zoom instead.
   const z = Number(localStorage.getItem('nl.zoom'));
-  if (z > 0 && z !== 1 && !matchMedia('(max-width: 760px)').matches) document.documentElement.style.zoom = String(z);
+  if (z > 0 && z !== 1 && !matchMedia('(max-width: 760px)').matches) { document.documentElement.style.zoom = String(z); document.documentElement.style.setProperty('--zoom', String(z)); }
 } catch { /* storage blocked */ }

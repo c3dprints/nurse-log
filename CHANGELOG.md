@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.14
+
+- Feedback: Settings > Feedback has a text box and a Submit button. It emails the note to Hi@c3dprints.com through the school's email account (Settings > Email), with the sender's name, school and version; replies go to the sender.
+- Update prompt: when an admin opens Nurse's Log (or signs in), it checks for a newer version and asks "Update now" or "Later". Later waits until the app is opened again.
+- Text size fits the window: at bigger sizes (for example 160%) the app stays exactly one window tall, so the menu, Settings and Sign out stay on screen without scrolling the whole page. The menu scrolls on its own only in very short windows.
+
 ## 1.0.13
 
 - Text size: the first time Nurse's Log opens on a PC, a small card asks "Is the text too small?" with A- / A+ buttons to make everything bigger, and the window grows to fit. Change it any time in Settings > Appearance > Text size, or with Ctrl + plus, Ctrl + minus, Ctrl + 0 or Ctrl + mouse wheel. The size is remembered on each PC (phones keep pinch zoom).

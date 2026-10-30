@@ -444,6 +444,16 @@ async function httpTests() {
       await req('POST', '/api/settings', { smtp: { host: '', port: 587, user: '', from: '', clearPass: true } });
     });
 
+    await test('http: feedback needs text and the school email set up', async () => {
+      const empty = await req('POST', '/api/feedback', { text: '   ' });
+      assert.strictEqual(empty.status, 400);
+      assert.match(empty.json.error, /write your feedback/);
+      const noMail = await req('POST', '/api/feedback', { text: 'Works great' });
+      assert.strictEqual(noMail.status, 400);
+      assert.match(noMail.json.error, /email is not set up/);
+      assert.strictEqual((await req('POST', '/api/feedback', { text: 'x'.repeat(5001) })).status, 400);
+    });
+
     await test('http: dictation fills form values through ChatGPT, key never sent back', async () => {
       const fields = [{ name: 'guardian_name', label: 'Parent / guardian' }, { name: 'guardian_phone', label: 'Guardian phone', type: 'tel' },
         { name: 'med_consent', label: 'Permission', type: 'select', choices: ['', 'On file', 'Not on file'] }, { name: 'sex', label: 'Sex', type: 'select', choices: ['', 'F', 'M'] }];

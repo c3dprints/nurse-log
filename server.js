@@ -841,6 +841,33 @@ route('POST', '/api/settings/test-email', { admin: true }, async ({ user }) => {
   return { sentTo: user.email };
 });
 
+// Settings > Feedback: a note from any signed-in user to the developer, sent through
+// the school's own email account (Settings > Email). One note per user per minute.
+const FEEDBACK_TO = 'Hi@c3dprints.com';
+const lastFeedback = new Map();
+route('POST', '/api/feedback', async ({ body, user }) => {
+  const text = String(body.text || '').trim();
+  if (!text) throw fail(400, 'write your feedback first');
+  if (text.length > 5000) throw fail(400, 'feedback is too long (5000 characters at most)');
+  const smtp = db.setting('smtp', {});
+  if (!mailer.configured(smtp)) throw fail(400, 'email is not set up yet; an admin sets it up in Settings > Email');
+  if (Date.now() - (lastFeedback.get(user.id) || 0) < 60000) throw fail(429, 'feedback was just sent; try again in a minute');
+  lastFeedback.set(user.id, Date.now());
+  const school = db.setting('schoolName', '');
+  try {
+    await mailer.send(smtp, {
+      to: FEEDBACK_TO, replyTo: user.email,
+      subject: `${APP_NAME} feedback (v${pkg.version}${school ? `, ${school}` : ''})`,
+      text: [text, '', '--', `From: ${user.full_name} <${user.email}>`, `School: ${school}`, `Version: ${pkg.version}`].join('\n'),
+    });
+  } catch (e) {
+    lastFeedback.delete(user.id);
+    throw fail(400, `send failed: ${e.message}`);
+  }
+  db.audit(user, 'feedback.sent', { details: { to: FEEDBACK_TO, chars: text.length } });
+  return { sent: true };
+});
+
 route('POST', '/api/settings/test-ai', { admin: true }, async ({ user }) => {
   const a = aiSettings();
   if (!a.key) throw fail(400, 'add an OpenAI API key first');
@@ -882,7 +909,11 @@ route('POST', '/api/settings/pick-folder', { admin: true }, async ({ req }) => {
   return { folder: await dialogs.pickFolder({ folder: db.setting('exportFolder', ''), title: 'Default folder for "Save to folder"' }) };
 });
 
-route('POST', '/api/update/check', { admin: true }, () => checkForUpdate());
+// { cached: true } (the check when the app opens) reuses a check from the last 10 minutes.
+route('POST', '/api/update/check', { admin: true }, ({ body }) => {
+  if (body.cached && updateState.checkedAt && !updateState.error && Date.now() - updateState.checkedAt < 10 * 60 * 1000) return updateState;
+  return checkForUpdate();
+});
 route('POST', '/api/update/install', { admin: true }, ({ user }) => {
   if (!updateState.available) throw fail(400, 'no update available');
   installUpdate(updateState.latest, user).catch((e) => log(`update failed: ${e.message}`));

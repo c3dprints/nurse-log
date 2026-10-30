@@ -329,7 +329,9 @@ function getZoom() {
 function setZoom(z) {
   if (!ZOOMS.includes(z)) z = 1;
   try { localStorage.setItem('nl.zoom', String(z)); } catch { /* storage off */ }
-  document.documentElement.style.zoom = isPhone() || z === 1 ? '' : String(z);
+  const on = isPhone() || z === 1 ? '' : String(z);
+  document.documentElement.style.zoom = on;
+  if (on) document.documentElement.style.setProperty('--zoom', on); else document.documentElement.style.removeProperty('--zoom');
   for (const el of document.querySelectorAll('.zoom-now')) el.textContent = pct(z);
   // Bigger text needs a bigger window: grow the app window to its usual size times the zoom,
   // within the screen. Never shrinks it and leaves a maximized window alone.
@@ -692,6 +694,7 @@ function renderShell() {
       h('button', { class: 'nav nav-out', type: 'button', onclick: signOut }, icon('out'), 'Sign out'),
       h('div', { class: 'who' }, h('b', {}, S.user.fullName), `${S.user.username} \u00B7 ${S.user.role}`)),
     main));
+  offerUpdate();
   const views = { today: viewToday, students: viewStudents, student: viewStudent, visits: viewVisitLog, given: viewGivenLog, audit: viewAudit, settings: viewSettings };
   (views[r.name] || viewToday)(main, r).catch((e) => {
     if (e.message !== 'signed out') fill(main, h('div', { class: 'alert bad' }, e.message));
@@ -1337,7 +1340,7 @@ function applyValues(form, list, values) {
 
 async function viewSettings(main, r) {
   const admin = S.user.role === 'admin';
-  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help'], ['about', 'About']];
+  const tabs = [['account', 'My account'], ['appearance', 'Appearance'], ['remote', 'Remote access'], ...(admin ? [['users', 'Users'], ['school', 'School & security'], ['email', 'Email'], ['ai', 'Dictation & ChatGPT'], ['saving', 'Saving & backup'], ['updates', 'Updates'], ['audit', 'Audit log']] : []), ['help', 'Help'], ['feedback', 'Feedback'], ['about', 'About']];
   const tab = tabs.some((t) => t[0] === r.tab) ? r.tab : 'account';
   const data = admin ? await get('/api/settings') : null;
   if (data) S.exportFolder = data.settings.exportFolder;
@@ -1348,7 +1351,7 @@ async function viewSettings(main, r) {
       h('div', { class: 'tabs' }, tabs.map(([k, l]) => h('button', { class: 'tab' + (k === tab ? ' on' : ''), type: 'button', onclick: () => go(`#/settings/${k}`) }, l))),
       body));
   const reload = () => viewSettings(main, r);
-  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp, about: setAbout })[tab](body, data, reload);
+  await ({ account: setAccount, appearance: setAppearance, remote: setRemote, users: setUsers, school: setSchool, email: setEmail, ai: setAi, saving: setSaving, updates: setUpdates, audit: setAudit, help: setHelp, feedback: setFeedback, about: setAbout })[tab](body, data, reload);
 }
 
 function section(title, ...kids) {
@@ -1756,6 +1759,22 @@ async function setAudit(body) {
 
 // Settings > Help: plain-language guide, open to every user.
 // Settings > About: version, the beta notice and the license, for everyone.
+function setFeedback(body) {
+  const box = h('textarea', { rows: 6, maxlength: 5000, 'aria-label': 'Feedback', placeholder: 'What works, what doesn’t, what you’d like to see…' });
+  const btn = h('button', {
+    class: 'btn primary', type: 'button',
+    onclick: async () => {
+      if (!box.value.trim()) return toast('Write your feedback first.', true);
+      btn.disabled = true;
+      try { await post('/api/feedback', { text: box.value }); box.value = ''; toast('Thanks! Your feedback was sent.'); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+    },
+  }, 'Submit');
+  body.append(section('Feedback',
+    h('p', { class: 'muted' }, 'Sent to the developer at c3dprints. Please leave out student names and health details.'),
+    box,
+    h('div', { class: 'row', style: 'margin-top:10px' }, btn)));
+}
+
 function setAbout(body) {
   body.append(
     section('Nurse\u2019s Log',
@@ -1901,6 +1920,28 @@ function setUpdates(body, d, reload) {
       } }, `Install ${u.latest}`) : null),
     h('label', { class: 'check', style: 'margin-top:14px' }, auto, 'Install updates automatically'),
     h('p', { class: 'muted small' }, 'Updates come from the Nurse’s Log GitHub releases. Student records live outside the app folder and an update never changes them.')));
+}
+
+// Opening the app (or signing in) checks for a newer version once; admins, who can
+// install it, get Update now or Later. Later waits until the app is opened again.
+let updateAsked = false;
+async function offerUpdate() {
+  if (updateAsked || !S.user || S.user.role !== 'admin') return;
+  updateAsked = true;
+  let u;
+  try { u = await post('/api/update/check', { cached: true }); } catch { return; }
+  if (!u || !u.available) return;
+  try { if (sessionStorage.getItem('nl.updateLater') === u.latest) return; } catch { /* storage off */ }
+  const m = modal('Update available', [
+    h('p', {}, `Nurse’s Log ${u.latest.replace(/^v/, '')} is ready to install. You have ${S.version}.`),
+    h('p', { class: 'muted' }, 'It takes about a minute, then the app reloads. Student records are not touched. Everyone signed in will need to sign in again.'),
+  ], [
+    ['Later', () => { try { sessionStorage.setItem('nl.updateLater', u.latest); } catch { /* storage off */ } m.close(); }],
+    ['Update now', async () => {
+      m.close();
+      try { await post('/api/update/install'); toast('Installing… the app will reload.'); waitForRestart(); } catch (e) { toast(e.message, true); }
+    }, 'primary'],
+  ]);
 }
 
 async function waitForRestart() {

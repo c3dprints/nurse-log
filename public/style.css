@@ -91,7 +91,9 @@ h3 { font-size: 14px; margin: 18px 0 8px; }
 .hidden { display: none !important; }
 
 /* ---- shell ---- */
-.shell { display: grid; grid-template-columns: 210px 1fr; height: 100vh; }
+/* --zoom is the text size (Settings > Appearance). CSS zoom scales vh too, so full-height
+   areas divide by it to stay exactly one window tall at any size. */
+.shell { display: grid; grid-template-columns: 210px 1fr; height: calc(100vh / var(--zoom, 1)); }
 .side {
   background: var(--panel);
   border-right: 1px solid var(--line);
@@ -99,6 +101,8 @@ h3 { font-size: 14px; margin: 18px 0 8px; }
   flex-direction: column;
   padding: 14px 10px;
   gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 14px; }
 .brand img { width: 30px; height: 30px; }
@@ -184,13 +188,13 @@ tr.click:hover td { background: var(--panel-2); }
 .menu button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 4px; cursor: pointer; }
 .menu button:hover, .menu button:focus-visible { background: var(--panel-2); }
 .menu small { display: block; color: var(--muted); font-size: 11px; }
-.overlay { position: fixed; inset: 0; background: rgba(10, 15, 20, .45); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; z-index: 50; overflow: auto; }
+.overlay { position: fixed; inset: 0; background: rgba(10, 15, 20, .45); display: flex; align-items: flex-start; justify-content: center; padding: calc(6vh / var(--zoom, 1)) 16px; z-index: 50; overflow: auto; }
 .modal { background: var(--panel); border-radius: 10px; width: 100%; max-width: 680px; padding: 20px; box-shadow: 0 20px 50px rgba(0,0,0,.3); }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 /* Text size: Settings > Appearance and the first-open card */
 .zoom-ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .zoom-ctl .zoom-now { min-width: 52px; text-align: center; }
-.zoom-offer { position: fixed; top: 16px; right: 16px; z-index: 55; width: 320px; max-width: calc(100vw - 32px); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); padding: 14px 16px; }
+.zoom-offer { position: fixed; top: 16px; right: 16px; z-index: 55; width: 320px; max-width: calc(100vw / var(--zoom, 1) - 32px); background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .2); padding: 14px 16px; }
 .zoom-offer p { margin: 6px 0 10px; }
 .zoom-offer .row { justify-content: flex-end; margin-top: 12px; }
 #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 60; }
@@ -198,7 +202,7 @@ tr.click:hover td { background: var(--panel-2); }
 .toast.bad { background: var(--danger); color: #fff; }
 
 /* ---- sign in ---- */
-.gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.gate { min-height: calc(100vh / var(--zoom, 1)); display: flex; align-items: center; justify-content: center; padding: 20px; }
 .gate .panel { width: 100%; max-width: 440px; padding: 26px; }
 .gate .brand { padding: 0 0 18px; }
 .gate form > * + * { margin-top: 12px; }
