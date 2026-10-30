@@ -280,7 +280,7 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 
 // ---- app state and routing ------------------------------------------------------
 
-const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false, dictateKey: 'F2', board: null, device: null, pinSignIn: true };
+const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, mailRelay: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false, dictateKey: 'F2', board: null, device: null, pinSignIn: true };
 const $app = document.getElementById('app');
 
 // [key, name, kind, swatch colors: background, panel, accent, style]
@@ -394,7 +394,7 @@ async function loadState() {
   const st = await api('GET', '/api/state', null, { noReauth: true });
   if (st.theme) applyTheme(st.theme);
   Object.assign(S, {
-    user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady,
+    user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady, mailRelay: !!st.mailRelay,
     idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady, dictateKey: st.dictateKey || 'F2', device: st.device || null, pinSignIn: st.pinSignIn !== false,
   });
 }
@@ -1688,15 +1688,20 @@ function setEmail(body, d, reload) {
     ['pass', sm.hasPass ? 'Password (saved; type to replace)' : 'Password / app password', 'password', { autocomplete: 'new-password' }],
     ['from', 'Send from, e.g. Nurse Office <nurse@school.org>', 'text', { wide: true }],
   ], { ...sm, pass: '' });
+  const own = !!(sm.host && sm.from);
   body.append(section('Email for password resets',
-    h('p', { class: 'muted' }, 'Reset codes are sent from this account. For Gmail or Microsoft 365, make an app password for the account and use port 587.'),
+    S.mailRelay
+      ? h('p', { class: 'muted' }, own
+        ? 'Reset codes are sent from the school account below. Clear the server and Send from boxes to go back to the built-in Nurse’s Log email.'
+        : 'Nothing to set up: reset codes and feedback are sent by Nurse’s Log’s own email (hi@c3dprints.com). Fill this in only to send reset codes from the school’s own address instead. For Gmail or Microsoft 365, make an app password for the account and use port 587.')
+      : h('p', { class: 'muted' }, 'Reset codes are sent from this account. For Gmail or Microsoft 365, make an app password for the account and use port 587.'),
     S.emailReady ? null : h('div', { class: 'alert warn' }, 'Email is not set up yet, so "Forgot password?" only works with recovery codes.'),
     err, form,
     h('div', { class: 'row', style: 'margin-top:10px' },
       h('button', { class: 'btn primary', onclick: async () => {
         try {
           const s = await post('/api/settings', { smtp: readForm(form) });
-          S.emailReady = !!(s.smtp.host && s.smtp.from);
+          S.emailReady = !!(s.smtp.host && s.smtp.from) || S.mailRelay;
           toast('Email settings saved');
           reload();
         } catch (e) { showErr(err, e.message); }
@@ -1770,7 +1775,7 @@ function setFeedback(body) {
     },
   }, 'Submit');
   body.append(section('Feedback',
-    h('p', { class: 'muted' }, 'Sent to the developer at c3dprints. Please leave out student names and health details.'),
+    h('p', { class: 'muted' }, 'Sent to the developer at hi@c3dprints.com. Please leave out student names and health details.'),
     box,
     h('div', { class: 'row', style: 'margin-top:10px' }, btn)));
 }

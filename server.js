@@ -411,7 +411,7 @@ route('POST', '/api/window-icon', { open: true }, ({ req }) => {
 route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   app: APP, version: pkg.version, needsSetup: auth.needsSetup(),
   schoolName: db.setting('schoolName', ''), user: auth.publicUser(user),
-  emailReady: mailer.configured(db.setting('smtp', {})), idleMinutes: db.setting('idleMinutes', 15),
+  emailReady: mailer.configured(db.setting('smtp', {})) || mailer.relayReady(), mailRelay: mailer.relayReady(), idleMinutes: db.setting('idleMinutes', 15),
   exportFolder: user ? db.setting('exportFolder', '') : '',
   theme: user ? db.setting(`theme:${user.id}`, 'system') : null,
   dictateKey: user ? db.setting(`dictateKey:${user.id}`, DEFAULT_DICTATE_KEY) : null,
@@ -576,13 +576,15 @@ route('POST', '/api/logout', { open: true }, ({ user, token, body, res }) => {
 route('POST', '/api/reset/request', { open: true }, async ({ body, req }) => {
   checkMisses(req);
   const smtp = db.setting('smtp', {});
-  if (!mailer.configured(smtp)) return { sent: false, emailReady: false };
+  const own = mailer.configured(smtp);
+  if (!own && !mailer.relayReady()) return { sent: false, emailReady: false };
   const u = auth.byLogin(body.login);
   if (u && u.active && Date.now() - (lastResetMail.get(u.id) || 0) > 60000) {
     lastResetMail.set(u.id, Date.now());
     const code = auth.makeResetCode(u.id);
     try {
-      await mailer.send(smtp, { to: u.email, subject: `${APP_NAME} password reset code`, text: mailer.resetText(u, code, APP_NAME) });
+      if (own) await mailer.send(smtp, { to: u.email, subject: `${APP_NAME} password reset code`, text: mailer.resetText(u, code, APP_NAME) });
+      else await mailer.relay({ kind: 'reset', to: u.email, code });
       db.audit(u, 'password.reset-requested', { details: 'code emailed' });
     } catch (e) {
       log(`reset mail failed: ${e.message}`);
@@ -841,8 +843,9 @@ route('POST', '/api/settings/test-email', { admin: true }, async ({ user }) => {
   return { sentTo: user.email };
 });
 
-// Settings > Feedback: a note from any signed-in user to the developer, sent through
-// the school's own email account (Settings > Email). One note per user per minute.
+// Settings > Feedback: a note from any signed-in user to the developer, sent from
+// hi@c3dprints.com through the mail relay, or through the school's own email account
+// (Settings > Email) when there is no relay. One note per user per minute.
 const FEEDBACK_TO = 'Hi@c3dprints.com';
 const lastFeedback = new Map();
 route('POST', '/api/feedback', async ({ body, user }) => {
@@ -850,12 +853,13 @@ route('POST', '/api/feedback', async ({ body, user }) => {
   if (!text) throw fail(400, 'write your feedback first');
   if (text.length > 5000) throw fail(400, 'feedback is too long (5000 characters at most)');
   const smtp = db.setting('smtp', {});
-  if (!mailer.configured(smtp)) throw fail(400, 'email is not set up yet; an admin sets it up in Settings > Email');
+  if (!mailer.relayReady() && !mailer.configured(smtp)) throw fail(400, 'email is not set up yet; an admin sets it up in Settings > Email');
   if (Date.now() - (lastFeedback.get(user.id) || 0) < 60000) throw fail(429, 'feedback was just sent; try again in a minute');
   lastFeedback.set(user.id, Date.now());
   const school = db.setting('schoolName', '');
   try {
-    await mailer.send(smtp, {
+    if (mailer.relayReady()) await mailer.relay({ kind: 'feedback', text, name: user.full_name, email: user.email, school, version: pkg.version });
+    else await mailer.send(smtp, {
       to: FEEDBACK_TO, replyTo: user.email,
       subject: `${APP_NAME} feedback (v${pkg.version}${school ? `, ${school}` : ''})`,
       text: [text, '', '--', `From: ${user.full_name} <${user.email}>`, `School: ${school}`, `Version: ${pkg.version}`].join('\n'),

@@ -250,13 +250,13 @@ function fakeOpenAI() {
 const TS_IP = '127.0.0.2'; // stands in for this PC's Tailscale address
 const TS_DNS = 'nurse-pc.tail-test.ts.net';
 let cookie = '';
-function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1', from } = {}) {
+function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1', from, port = PORT } = {}) {
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const r = http.request({
-      host: ip, port: PORT, path: url, method, localAddress: from,
+      host: ip, port, path: url, method, localAddress: from,
       headers: {
-        Host: `${ip}:${PORT}`,
+        Host: `${ip}:${port}`,
         ...(method === 'POST' ? { 'Content-Type': 'application/json', 'X-Nurse-Log': '1' } : {}),
         ...(cookie ? { Cookie: cookie } : {}),
         ...headers,
@@ -335,7 +335,7 @@ async function httpTests() {
   const exportDir = path.join(tmp, 'exports');
   fs.mkdirSync(exportDir);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP, NL_TAILSCALE_DNS: TS_DNS, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1` },
+    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP, NL_TAILSCALE_DNS: TS_DNS, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1`, NL_MAIL_RELAY: '' },
     stdio: 'ignore', windowsHide: true,
   });
   const openai = await fakeOpenAI();
@@ -637,10 +637,92 @@ async function httpTests() {
   }
 }
 
+// The mail relay (relay/worker.mjs) on its own, then end to end: an app server with
+// NL_MAIL_RELAY -> a local server running the real worker code -> a fake Resend.
+const RELAY_PORT = 8943;
+const MAIL_PORT = 8944;
+async function relayTests() {
+  const { handle } = await import('../relay/worker.mjs');
+  const sent = [];
+  const fakeResend = async (url, opt) => { sent.push({ url, auth: opt.headers.Authorization, ...JSON.parse(opt.body) }); return new Response('{"id":"x"}', { status: 200 }); };
+  let limitOk = true;
+  const env = { RESEND_KEY: 'test-key', FROM: "Nurse's Log <hi@c3dprints.com>", FEEDBACK_TO: 'hi@c3dprints.com', LIMIT: { limit: async () => ({ success: limitOk }) } };
+  const call = (body, headers = { 'X-Nurse-Log': '1' }, path = '/send') => handle(new Request(`https://relay.test${path}`, { method: 'POST', headers, body: JSON.stringify(body) }), env, fakeResend);
+
+  await test('relay: feedback only ever goes to the developer, resets carry only a code', async () => {
+    let r = await call({ kind: 'feedback', text: 'Love it', name: 'Ada', email: 'ada@example.org', school: 'Test School', version: '1.0.15', to: 'victim@example.org' });
+    assert.strictEqual(r.status, 200);
+    let m = sent.pop();
+    assert.deepStrictEqual(m.to, ['hi@c3dprints.com']);
+    assert.strictEqual(m.reply_to, 'ada@example.org');
+    assert.strictEqual(m.auth, 'Bearer test-key');
+    assert.match(m.text, /Love it/);
+    r = await call({ kind: 'reset', to: 'nurse@example.org', code: '123456', name: 'Buy cheap pills at spam.example' });
+    assert.strictEqual(r.status, 200);
+    m = sent.pop();
+    assert.deepStrictEqual(m.to, ['nurse@example.org']);
+    assert.match(m.text, /123456/);
+    assert(!/spam/.test(m.text + m.subject), 'no caller text in reset mail');
+    assert.strictEqual((await call({ kind: 'reset', to: 'nurse@example.org', code: 'visit spam.example' })).status, 400);
+    assert.strictEqual((await call({ kind: 'reset', to: 'a@b.c, d@e.org', code: '123456' })).status, 400);
+    assert.strictEqual((await call({ kind: 'anything', to: 'x@example.org', text: 'hi' })).status, 400);
+    assert.strictEqual((await call({ kind: 'feedback', text: 'hi' }, {})).status, 403, 'needs the header');
+    assert.strictEqual((await call({ kind: 'feedback', text: 'hi' }, undefined, '/other')).status, 404);
+    limitOk = false;
+    assert.strictEqual((await call({ kind: 'feedback', text: 'hi' })).status, 429);
+    limitOk = true;
+    assert.strictEqual(sent.length, 0);
+  });
+
+  const relaySrv = http.createServer(async (q, s) => {
+    const chunks = [];
+    for await (const c of q) chunks.push(c);
+    const r = await handle(new Request(`http://127.0.0.1:${RELAY_PORT}${q.url}`, { method: q.method, headers: q.headers, body: Buffer.concat(chunks) }), env, fakeResend);
+    s.writeHead(r.status, { 'Content-Type': 'application/json' });
+    s.end(await r.text());
+  });
+  await new Promise((r) => relaySrv.listen(RELAY_PORT, '127.0.0.1', r));
+  const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+    env: { ...process.env, NL_PORT: String(MAIL_PORT), NL_DATA: path.join(tmp, 'mail'), NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_MAIL_RELAY: `http://127.0.0.1:${RELAY_PORT}` },
+    stdio: 'ignore', windowsHide: true,
+  });
+  const at = { port: MAIL_PORT };
+  try {
+    for (let i = 0; i < 100; i++) {
+      try { if ((await req('GET', '/api/ping', null, at)).json?.app === 'nurse-log') break; } catch { /* starting */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await test('http: with no school email, feedback and reset codes go out through the relay', async () => {
+      cookie = '';
+      assert.strictEqual((await req('GET', '/api/state', null, at)).json.emailReady, true);
+      assert.strictEqual((await req('POST', '/api/setup', { schoolName: 'Relay School', username: 'admin', fullName: 'Ada Admin', email: 'ada@example.org', password: PW }, at)).status, 200);
+      let r = await req('POST', '/api/feedback', { text: 'The dose button is great' }, at);
+      assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+      let m = sent.pop();
+      assert.deepStrictEqual(m.to, ['hi@c3dprints.com']);
+      assert.match(m.subject, /Relay School/);
+      assert.match(m.text, /The dose button is great[\s\S]*Ada Admin <ada@example.org>/);
+      assert.strictEqual((await req('POST', '/api/feedback', { text: 'again' }, at)).status, 429, 'one note a minute');
+      cookie = '';
+      r = await req('POST', '/api/reset/request', { login: 'admin' }, at);
+      assert.strictEqual(r.json.sent, true);
+      m = sent.pop();
+      assert.deepStrictEqual(m.to, ['ada@example.org']);
+      const code = m.text.match(/code is: (\d{6})/)[1];
+      r = await req('POST', '/api/reset/finish', { login: 'admin', code, password: 'Relay password 88' }, at);
+      assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+    });
+  } finally {
+    child.kill();
+    relaySrv.close();
+  }
+}
+
 (async () => {
   await unit();
   await setupUpdaterTests();
   await httpTests();
+  await relayTests();
   let failed = 0;
   for (const [ok, name, e] of results) {
     console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}`);
