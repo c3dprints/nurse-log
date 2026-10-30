@@ -1693,7 +1693,7 @@ function setEmail(body, d, reload) {
     S.mailRelay
       ? h('p', { class: 'muted' }, own
         ? 'Reset codes are sent from the school account below. Clear the server and Send from boxes to go back to the built-in Nurse’s Log email.'
-        : 'Nothing to set up: reset codes and feedback are sent by Nurse’s Log’s own email (hi@c3dprints.com). Fill this in only to send reset codes from the school’s own address instead. For Gmail or Microsoft 365, make an app password for the account and use port 587.')
+        : 'Nothing to set up: reset codes and feedback are sent by Nurse’s Log’s own email service. Fill this in only to send reset codes from the school’s own address instead. For Gmail or Microsoft 365, make an app password for the account and use port 587.')
       : h('p', { class: 'muted' }, 'Reset codes are sent from this account. For Gmail or Microsoft 365, make an app password for the account and use port 587.'),
     S.emailReady ? null : h('div', { class: 'alert warn' }, 'Email is not set up yet, so "Forgot password?" only works with recovery codes.'),
     err, form,

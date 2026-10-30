@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.15
+
+- Nurse's Log has its own email: password reset codes and Settings > Feedback now work with nothing to set up. They are sent by the Nurse's Log mail service (a Supabase function sending through Resend, the same setup MakerQ uses), so no email password is inside the app. Feedback goes to hi@c3dprints.com with the nurse as reply-to.
+- A school can still fill in Settings > Email to send reset codes from its own address.
+
 ## 1.0.14
 
 - Feedback: Settings > Feedback has a text box and a Submit button. It emails the note to Hi@c3dprints.com through the school's email account (Settings > Email), with the sender's name, school and version; replies go to the sender.

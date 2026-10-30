@@ -26,6 +26,6 @@ supabase functions deploy nurse-log-mail --project-ref enyimtvgqzmpaiaeiyxj --no
 
 Then `curl -X POST` it without the `X-Nurse-Log: 1` header: a 403 means it is up, a 500 means it failed to boot.
 
-Optional secrets: `NURSE_LOG_FROM` (default `Nurse's Log <hi@c3dprints.com>`; the domain must be verified in Resend) and `NURSE_LOG_FEEDBACK_TO` (default `hi@c3dprints.com`).
+Secrets: `NURSE_LOG_FROM` is set to `Nurse's Log <noreply@makerq.io>` (2026-10-30), because Resend refuses hi@c3dprints.com until c3dprints.com is verified there (Resend > Domains, DNS records in GoDaddy); after that, `supabase secrets set "NURSE_LOG_FROM=Nurse's Log <hi@c3dprints.com>" --project-ref enyimtvgqzmpaiaeiyxj` switches it with no app update. Optional: `NURSE_LOG_FEEDBACK_TO` (default `hi@c3dprints.com`).
 
 To stop it: `supabase functions delete nurse-log-mail --project-ref enyimtvgqzmpaiaeiyxj`. The app then falls back to each school's own email (Settings > Email).
