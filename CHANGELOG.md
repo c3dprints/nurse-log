@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.5
+
+- Material themes: a new section in Settings > Appearance with soft, faded palettes (Mist, Blush, Eucalyptus, Lilac, Clay, Seafoam, plus dark Dusk and Slate). They also switch to a material look: rounder cards with gentle shadows, pill-shaped tonal buttons, filled text boxes, rounded navigation and dialogs. The original themes are unchanged.
+- Phone number boxes now match the other text boxes in every theme.
+
 ## 1.0.4
 
 - Guardian and second contact phone numbers are capped at 10 digits and shown as (555) 123-4567 while you type. A leading 1 is dropped; anything else that is not 10 digits is refused.

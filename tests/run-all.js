@@ -340,6 +340,13 @@ async function httpTests() {
       assert.strictEqual((await req('POST', '/api/account/theme', { theme: 'neon' })).status, 400);
       const css = (await req('GET', '/style.css', null, { raw: true })).buf.toString();
       for (const t of ['ocean', 'lavender', 'rose', 'sage', 'sunshine', 'night', 'midnight']) assert(css.includes(`[data-theme="${t}"]`), `style.css has ${t}`);
+      const app = (await req('GET', '/app.js', null, { raw: true })).buf.toString();
+      for (const t of ['mist', 'blush', 'eucalyptus', 'lilac', 'clay', 'seafoam', 'dusk', 'slate']) {
+        assert(css.includes(`[data-theme="${t}"] {`), `style.css has material ${t}`);
+        assert(app.includes(`['${t}', `) && app.includes("'material']"), `app.js lists ${t}`);
+        assert.strictEqual((await req('POST', '/api/account/theme', { theme: t })).status, 200, t);
+      }
+      assert(css.includes('[data-style="material"] .btn'), 'material shape styles');
     });
 
     await test('http: last admin cannot be demoted', async () => {

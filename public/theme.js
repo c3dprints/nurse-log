@@ -4,4 +4,5 @@
 try {
   const t = localStorage.getItem('nl.theme');
   if (t && /^[a-z]+$/.test(t)) document.documentElement.setAttribute('data-theme', t);
+  if (localStorage.getItem('nl.style') === 'material') document.documentElement.setAttribute('data-style', 'material');
 } catch { /* storage blocked */ }

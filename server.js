@@ -490,7 +490,8 @@ route('POST', '/api/account/password', { allowMustChange: true }, ({ body, user,
 });
 
 // Each user's own color theme (Settings > Appearance), kept with their account.
-const THEMES = ['system', 'teal', 'ocean', 'lavender', 'rose', 'sage', 'sunshine', 'night', 'midnight'];
+const THEMES = ['system', 'teal', 'ocean', 'lavender', 'rose', 'sage', 'sunshine', 'night', 'midnight',
+  'mist', 'blush', 'eucalyptus', 'lilac', 'clay', 'seafoam', 'dusk', 'slate'];
 route('POST', '/api/account/theme', { allowMustChange: true }, ({ body, user }) => {
   if (!THEMES.includes(body.theme)) throw fail(400, 'unknown theme');
   db.setSetting(`theme:${user.id}`, body.theme);

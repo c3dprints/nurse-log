@@ -1,6 +1,6 @@
 {
   "name": "nurse-log",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "School nurse office app: students, medications, visit log, Excel export, audit trail.",
   "main": "server.js",
   "private": true,

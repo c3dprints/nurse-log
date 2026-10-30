@@ -278,7 +278,7 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false };
 const $app = document.getElementById('app');
 
-// [key, name, kind, swatch colors: background, panel, accent]
+// [key, name, kind, swatch colors: background, panel, accent, style]
 const THEMES = [
   ['system', 'Match Windows', 'light or dark', ['#f4f6f8', '#12171c', '#0f766e']],
   ['teal', 'Teal', 'light', ['#f4f6f8', '#ffffff', '#0f766e']],
@@ -289,13 +289,25 @@ const THEMES = [
   ['sunshine', 'Sunshine', 'light', ['#fbf7ef', '#fffdf9', '#a65705']],
   ['night', 'Night', 'dark', ['#12171c', '#1a2128', '#2dd4bf']],
   ['midnight', 'Midnight', 'dark', ['#0f1420', '#161d2d', '#7aa7ff']],
+  ['mist', 'Mist', 'light', ['#f3f5f8', '#fbfcfd', '#52708e'], 'material'],
+  ['blush', 'Blush', 'light', ['#f8f2f2', '#fffbfb', '#985f68'], 'material'],
+  ['eucalyptus', 'Eucalyptus', 'light', ['#f2f5f1', '#fbfcfa', '#5e7d5b'], 'material'],
+  ['lilac', 'Lilac', 'light', ['#f5f3f8', '#fcfbfe', '#7a66a0'], 'material'],
+  ['clay', 'Clay', 'light', ['#f8f4ef', '#fffcf8', '#9a6d4f'], 'material'],
+  ['seafoam', 'Seafoam', 'light', ['#f0f6f5', '#fafdfc', '#4f8078'], 'material'],
+  ['dusk', 'Dusk', 'dark', ['#1c1b20', '#25242b', '#b8a8d9'], 'material'],
+  ['slate', 'Slate', 'dark', ['#1a1e22', '#22282d', '#9cbfd6'], 'material'],
 ];
 
 // Teal is the base light palette in style.css; every other theme overrides it by name.
+// Material themes also set <html data-style="material"> for the rounder, softer look.
 function applyTheme(theme) {
-  const t = THEMES.some((x) => x[0] === theme) ? theme : 'system';
-  document.documentElement.setAttribute('data-theme', t);
-  try { localStorage.setItem('nl.theme', t); } catch { /* storage blocked */ }
+  const found = THEMES.find((x) => x[0] === theme) || THEMES[0];
+  const style = found[4] || 'classic';
+  document.documentElement.setAttribute('data-theme', found[0]);
+  if (style === 'material') document.documentElement.setAttribute('data-style', 'material');
+  else document.documentElement.removeAttribute('data-style');
+  try { localStorage.setItem('nl.theme', found[0]); localStorage.setItem('nl.style', style); } catch { /* storage blocked */ }
 }
 
 async function loadState() {
@@ -1139,8 +1151,8 @@ async function setRemote(body, _d, reload) {
 
 function setAppearance(body) {
   const current = document.documentElement.getAttribute('data-theme') || 'system';
-  const cards = THEMES.map(([key, name, kind, [bg, panel, accent]]) => h('button', {
-    class: 'theme-card' + (key === current ? ' on' : ''), type: 'button', 'aria-pressed': String(key === current), 'data-key': key,
+  const cards = THEMES.map(([key, name, kind, [bg, panel, accent], style]) => h('button', {
+    class: 'theme-card' + (style === 'material' ? ' material' : '') + (key === current ? ' on' : ''), type: 'button', 'aria-pressed': String(key === current), 'data-key': key,
     onclick: async () => {
       applyTheme(key);
       for (const c of cards) { const on = c.dataset.key === key; c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on)); }
@@ -1149,9 +1161,14 @@ function setAppearance(body) {
   },
   h('div', { class: 'sw', style: `background:${bg}` }, h('i', { style: `background:${accent}` }), h('i', { style: `background:${panel};border:1px solid rgba(127,127,127,.25)` })),
   h('div', { class: 'name' }, name, h('small', {}, kind))));
-  body.append(section('Theme',
-    h('p', { class: 'muted' }, 'Pick the colors for your account. Your choice follows you to any PC you sign in on.'),
-    h('div', { class: 'themes' }, cards)));
+  const group = (style) => cards.filter((c, i) => (THEMES[i][4] || 'classic') === style);
+  body.append(
+    section('Theme',
+      h('p', { class: 'muted' }, 'Pick the colors for your account. Your choice follows you to any PC you sign in on.'),
+      h('div', { class: 'themes' }, group('classic'))),
+    section('Material themes',
+      h('p', { class: 'muted' }, 'Soft, faded colors with a material look: rounder cards with gentle shadows, pill buttons and filled text boxes.'),
+      h('div', { class: 'themes' }, group('material'))));
 }
 
 async function setUsers(body, _d, reload) {
