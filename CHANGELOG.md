@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.19
+
+- Encryption: the records file and every daily backup are now encrypted (AES-256-GCM). The key is protected by Windows for the account that runs Nurse's Log, so nothing changes day to day. New installs are encrypted from the start; existing ones turn it on in Settings > School & security. **Write down the records recovery key it shows once**: it is the only way to open the records or a backup on another PC.
+- If the key is missing (for example a copied backup on a new PC), Nurse's Log opens a locked screen that asks for the records recovery key at the office PC.
+- Roles: besides admin and nurse there are now **aide** (records doses and visits, uses dictation, cannot change student info or medications or export) and **viewer** (read only). The server enforces them, and buttons a role cannot use are hidden.
+- Two-step sign-in: each user can turn on codes from an authenticator app in Settings > My account. Admins can require it for everyone and reset it for a user who lost their phone. The account recovery code works in place of a code.
+- Immunizations: each student has an Immunizations tab with a status (Complete, In progress, exemptions and more), notes and each dose given, with dictation. The Students page has an Immunization report export with one column per vaccine, and student exports include an Immunizations sheet.
+- Roster import: Students > Import roster reads a CSV or Excel export from the student information system, matches students by ID (or name and birth date), shows what will be added, updated or restored before anything changes, and never clears a value with a blank cell. Full-roster mode archives students missing from the file.
+- Retention: admins can delete an archived student for good, or have archived students deleted automatically after 1 to 7 years (Settings > Saving & backup). The audit log keeps who and when, without health details.
+- Erase everything: Settings > Saving & backup can delete all records, backups, logs and the key on this PC, for the end of a contract or a PC hand-off.
+- Signed updates: installers are now signed, and Nurse's Log refuses an update whose signature does not match.
+- District documents in `docs/`: privacy and security overview, phone and remote access, dictation setup, accessibility statement, and data privacy agreement notes.
+
 ## 1.0.18
 
 - Medication reminders: when a scheduled dose is due, Nurse's Log reminds you with a card and a chime in the app window (Record dose, Snooze 10 min, Dismiss), a Windows notification on the office PC, and a notification on phones that turned them on. Reminders stop once the dose is recorded.

@@ -11,8 +11,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const { Db, localDate } = require('./lib/db');
-const { Auth, checkEmail, verify } = require('./lib/auth');
+const { Auth, checkEmail, verify, can, ROLES } = require('./lib/auth');
 const { Records, dayRange } = require('./lib/records');
+const roster = require('./lib/roster');
 const excel = require('./lib/excel');
 const mailer = require('./lib/mailer');
 const dialogs = require('./lib/dialogs');
@@ -50,11 +51,32 @@ function log(msg) {
   } catch { /* logging must never stop the app */ }
 }
 
+// All null while the records are locked (encrypted, and this Windows account has
+// no key for them): the app then only answers the unlock screen.
 let db;
 let auth;
 let records;
 let alerts;
 let push;
+
+// How long archived students are kept before they are deleted for good
+// (Settings > Saving & backup); 0 keeps them until deleted by hand.
+const PURGE_CHOICES = [0, 1, 2, 3, 5, 7];
+
+async function openRecords() {
+  try {
+    db = await Db.open(DATA_DIR);
+  } catch (e) {
+    if (!e.locked) throw e;
+    db = auth = records = alerts = push = null;
+    log('records are encrypted and this Windows account has no key; waiting for the recovery key');
+    return;
+  }
+  auth = new Auth(db);
+  records = new Records(db);
+  push = new Push(db, log);
+  alerts = new Alerts(db, records, sendAlerts);
+}
 
 const fail = (code, msg) => Object.assign(new Error(msg), { code });
 
@@ -73,7 +95,7 @@ async function checkForUpdate() {
   } finally {
     updateBusy = false;
   }
-  if (updateState.available && db.setting('autoUpdate', false) && ['release', 'setup'].includes(updateState.mode)) {
+  if (updateState.available && db && db.setting('autoUpdate', false) && ['release', 'setup'].includes(updateState.mode)) {
     installUpdate(updateState.latest, null).catch((e) => log(`auto update failed: ${e.message}`));
   }
   return updateState;
@@ -110,7 +132,7 @@ function restart() {
 const remote = { listeners: new Map(), dnsName: null, state: 'Unknown', installed: true, error: null, checkedAt: null };
 
 async function syncRemote() {
-  const enabled = !!db.setting('remoteAccess', false);
+  const enabled = !!db && !!db.setting('remoteAccess', false);
   const st = await tailscale.status();
   Object.assign(remote, { dnsName: st.dnsName, state: st.state, installed: st.installed, checkedAt: Date.now() });
   const want = new Set(enabled ? tailscale.ips() : []);
@@ -202,6 +224,7 @@ async function buildExport(user, body) {
       medications: db.all('SELECT * FROM medications WHERE student_id = ? ORDER BY active DESC, name', [studentId]),
       given: records.givenLog({ studentId, limit: 10000 }),
       visits: records.visitLog({ studentId, limit: 10000 }),
+      immunizations: records.immunizations(studentId),
     };
     base = `${safeName(s.last_name)}_${safeName(s.first_name)}`;
   } else if (kind === 'students') {
@@ -217,12 +240,16 @@ async function buildExport(user, body) {
     if (user.role !== 'admin') throw fail(403, 'only an admin can export the audit log');
     data = records.auditLog({ ...rangeOf(body), limit: 20000 });
     base = 'Audit-log';
+  } else if (kind === 'immunizations') {
+    data = records.immunizationReport({ grade: body.grade || '' });
+    base = 'Immunization-report';
   } else if (kind === 'all') {
     data = {
       students: db.all('SELECT * FROM students ORDER BY last_name, first_name'),
       medications: db.all('SELECT m.*, s.first_name, s.last_name FROM medications m JOIN students s ON s.id = m.student_id ORDER BY s.last_name, s.first_name, m.name'),
       given: records.givenLog({ limit: 10000 }),
       visits: records.visitLog({ limit: 10000 }),
+      immunizations: db.all('SELECT i.*, s.first_name, s.last_name, s.student_no FROM immunizations i JOIN students s ON s.id = i.student_id ORDER BY s.last_name, s.first_name, i.vaccine, i.given_on'),
     };
     base = 'Nurse-Log-all-records';
   } else {
@@ -293,7 +320,7 @@ function guard(req) {
   const served = viaServe(req);
   if (!served && !hosts.has(String(req.headers.host || '').toLowerCase())) return 'bad host';
   if (isRemote(req)) {
-    if (!db.setting('remoteAccess', false)) return 'remote access is off';
+    if (!db || !db.setting('remoteAccess', false)) return 'remote access is off';
     if (served) {
       if (!tailscale.inTailnet(clientIp(req))) return 'not a Tailscale device';
     } else {
@@ -381,6 +408,9 @@ function settingsPublic() {
     schoolName: db.setting('schoolName', ''),
     idleMinutes: db.setting('idleMinutes', 15),
     auditDays: db.setting('auditDays', AUDIT_DAYS),
+    purgeYears: db.setting('purgeYears', 0),
+    require2fa: !!db.setting('require2fa', false),
+    encrypted: db.encrypted,
     pinSignIn: db.setting('pinSignIn', true) !== false,
     exportFolder: db.setting('exportFolder', ''),
     autoUpdate: db.setting('autoUpdate', false),
@@ -405,12 +435,12 @@ function route(method, pattern, opts, fn) {
   routes.push({ method, re, fn, ...opts });
 }
 
-route('GET', '/api/ping', { open: true }, () => ({ app: APP, version: pkg.version }));
+route('GET', '/api/ping', { open: true, locked: true }, () => ({ app: APP, version: pkg.version }));
 
 // The page asks on every load: Edge puts its own taskbar app ID back on a reload,
 // which drops the window under a plain Edge icon. Only the office PC's window.
 let lastWindowIcon = 0;
-route('POST', '/api/window-icon', { open: true }, ({ req }) => {
+route('POST', '/api/window-icon', { open: true, locked: true }, ({ req }) => {
   if (NO_DIALOGS || isRemote(req)) return { ok: true, skipped: true };
   if (Date.now() - lastWindowIcon > 3000) {
     lastWindowIcon = Date.now();
@@ -419,8 +449,9 @@ route('POST', '/api/window-icon', { open: true }, ({ req }) => {
   return { ok: true };
 });
 
-route('GET', '/api/state', { open: true }, ({ user, req }) => ({
-  app: APP, version: pkg.version, needsSetup: auth.needsSetup(),
+route('GET', '/api/state', { open: true, locked: true }, ({ user, req }) => (!db ? { app: APP, version: pkg.version, locked: true, remote: isRemote(req) } : {
+  app: APP, version: pkg.version, needsSetup: auth.needsSetup(), encrypted: db.encrypted,
+  require2fa: !!db.setting('require2fa', false),
   schoolName: db.setting('schoolName', ''), user: auth.publicUser(user),
   emailReady: mailer.configured(db.setting('smtp', {})) || mailer.relayReady(), mailRelay: mailer.relayReady(), idleMinutes: db.setting('idleMinutes', 15),
   exportFolder: user ? db.setting('exportFolder', '') : '',
@@ -435,6 +466,39 @@ route('GET', '/api/state', { open: true }, ({ user, req }) => ({
   })(),
   aiReady: user ? ai.configured(aiSettings()) : false,
 }));
+
+// The records are encrypted and this Windows account has no key for them (a new
+// PC, a reinstalled Windows, or a backup copied in): the records recovery key the
+// admin saved opens them, and the key is then kept for this account.
+let unlockMisses = 0;
+route('POST', '/api/unlock', { open: true, locked: true }, async ({ body, req }) => {
+  if (db) return { ok: true };
+  if (isRemote(req)) throw fail(400, 'unlock the records at the office PC');
+  if (unlockMisses >= 20) throw fail(429, 'too many wrong keys; restart Nurse’s Log to try again');
+  try {
+    Db.unlock(DATA_DIR, body.key);
+  } catch (e) {
+    unlockMisses++;
+    throw fail(400, e.message);
+  }
+  await openRecords();
+  if (!db) throw fail(500, 'the key was accepted but the records still did not open');
+  db.audit(null, 'records.unlocked', { details: 'opened with the records recovery key on this Windows account' });
+  syncRemote().catch(() => {});
+  return { ok: true };
+});
+
+// Turns on encryption of the records file (or makes a new records recovery key).
+// The key is shown once; the admin must keep it to open backups on another PC.
+route('POST', '/api/records/encrypt', { admin: true }, ({ body, user, req }) => {
+  if (isRemote(req)) throw fail(400, 'do this at the office PC');
+  if (!verify(body.password, user.pass_hash)) throw fail(400, 'password is wrong');
+  const was = db.encrypted;
+  let key;
+  try { key = db.encrypt(); } catch (e) { log(`encrypt failed: ${e.message}`); throw fail(500, 'could not turn on encryption; the details are in the log file'); }
+  db.audit(user, was ? 'records.new-recovery-key' : 'records.encrypted');
+  return { key, encrypted: true };
+});
 
 // Where to open the app from a phone. Any signed-in user can see it; only an admin can switch it on.
 route('GET', '/api/remote', () => remoteInfo());
@@ -459,13 +523,10 @@ route('POST', '/api/remote/https', { admin: true }, async ({ body, user, req }) 
   return info;
 });
 
-// QR code for one of this app's own addresses, as rows of 0/1 for the page to draw.
-route('GET', '/api/remote/qr', async ({ query }) => {
-  const info = await remoteInfo();
-  const allowed = [...info.urls, info.https.url].filter(Boolean);
-  if (!allowed.includes(query.url)) throw fail(400, 'not an address of this app');
+// A QR code as rows of 0/1 for the page to draw.
+function qrRows(text) {
   const q = qrcode(0, 'M');
-  q.addData(query.url);
+  q.addData(text);
   q.make();
   const n = q.getModuleCount();
   const rows = [];
@@ -474,7 +535,15 @@ route('GET', '/api/remote/qr', async ({ query }) => {
     for (let c = 0; c < n; c++) line += q.isDark(r, c) ? '1' : '0';
     rows.push(line);
   }
-  return { url: query.url, rows };
+  return rows;
+}
+
+// QR code for one of this app's own addresses.
+route('GET', '/api/remote/qr', async ({ query }) => {
+  const info = await remoteInfo();
+  const allowed = [...info.urls, info.https.url].filter(Boolean);
+  if (!allowed.includes(query.url)) throw fail(400, 'not an address of this app');
+  return { url: query.url, rows: qrRows(query.url) };
 });
 
 route('POST', '/api/setup', { open: true }, ({ body, res, req }) => {
@@ -488,8 +557,14 @@ route('POST', '/api/setup', { open: true }, ({ body, res, req }) => {
   if (body.schoolName) db.setSetting('schoolName', String(body.schoolName).trim().slice(0, 120));
   db.run('UPDATE users SET last_login = ? WHERE id = ?', [Date.now(), made.user.id]);
   db.audit(made.user, 'setup', { details: 'first admin account created' });
+  // A new install encrypts its records from the start.
+  let recordsKey = null;
+  try {
+    recordsKey = db.encrypt();
+    db.audit(made.user, 'records.encrypted');
+  } catch (e) { log(`encrypt at setup failed: ${e.message}`); }
   res.extraHeaders = setCookie(auth.startSession(made.user.id), req);
-  return { user: auth.publicUser(made.user), recovery: made.recovery };
+  return { user: auth.publicUser(made.user), recovery: made.recovery, recordsKey };
 });
 
 // Wrong passwords, PINs and reset codes from one address: after 30 in 15 minutes
@@ -519,9 +594,25 @@ route('POST', '/api/login', { open: true }, ({ body, res, req }) => {
     miss(req);
     throw fail(401, r.error);
   }
+  if (r.needCode) return { needCode: true, ticket: r.ticket };
   db.audit(r.user, 'login', { details: from });
   res.extraHeaders = setCookie(r.token, req);
   return { user: auth.publicUser(r.user) };
+});
+
+// Second step of a two-step sign-in: the authenticator code (or recovery code).
+route('POST', '/api/login/code', { open: true }, ({ body, res, req }) => {
+  checkMisses(req);
+  const r = auth.loginCode(body.ticket, body.code);
+  const from = isRemote(req) ? { from: `Tailscale ${clientIp(req)}${viaServe(req) ? ' (https)' : ''}` } : null;
+  if (r.error) {
+    if (r.user) db.audit(r.user, 'login.code-failed', { details: { ...from } });
+    miss(req);
+    throw fail(401, r.error);
+  }
+  db.audit(r.user, 'login', { details: { method: r.how === 'recovery' ? 'password + recovery code' : 'password + code', ...from } });
+  res.extraHeaders = setCookie(r.token, req);
+  return { user: auth.publicUser(r.user), how: r.how };
 });
 
 // Unlocks a remembered phone with its PIN.
@@ -629,7 +720,7 @@ route('GET', '/api/today', () => records.today());
 // ---- medication reminders and calendar ------------------------------------------------
 
 route('GET', '/api/calendar', ({ query }) => records.calendar(String(query.month || '')));
-route('POST', '/api/students/:id/alerts', ({ params, body, user }) => records.setStudentAlerts(user, params.id, !!body.on));
+route('POST', '/api/students/:id/alerts', { can: 'edit' }, ({ params, body, user }) => records.setStudentAlerts(user, params.id, !!body.on));
 
 // The open window asks for the doses that need attention now (Today banner).
 // idle: the window polls this every 30 seconds, which must not count as activity.
@@ -672,7 +763,7 @@ route('GET', '/api/students', ({ query }) => {
     grades: records.grades(),
   };
 });
-route('POST', '/api/students', ({ body, user }) => records.createStudent(user, body));
+route('POST', '/api/students', { can: 'edit' }, ({ body, user }) => records.createStudent(user, body));
 route('GET', '/api/students/:id', ({ params, user }) => {
   const b = records.board(user, params.id);
   b.student.photo_at = photoAt('student', params.id);
@@ -713,13 +804,13 @@ function sendPhoto(kind, id, res) {
 
 route('GET', '/api/photos/student/:id', ({ params, res }) => sendPhoto('student', params.id, res));
 route('GET', '/api/photos/user/:id', ({ params, res }) => sendPhoto('user', params.id, res));
-route('POST', '/api/students/:id/photo', { maxBody: 1024 * 1024 }, ({ params, body, user }) => {
+route('POST', '/api/students/:id/photo', { maxBody: 1024 * 1024, can: 'edit' }, ({ params, body, user }) => {
   records.student(params.id);
   const r = savePhoto('student', params.id, readJpeg(body));
   db.audit(user, 'student.photo', { entity: 'student', entityId: params.id, studentId: params.id, details: 'photo added or changed' });
   return r;
 });
-route('POST', '/api/students/:id/photo/remove', ({ params, user }) => {
+route('POST', '/api/students/:id/photo/remove', { can: 'edit' }, ({ params, user }) => {
   records.student(params.id);
   db.run("DELETE FROM photos WHERE kind = 'student' AND owner_id = ?", [params.id]);
   db.audit(user, 'student.photo-removed', { entity: 'student', entityId: params.id, studentId: params.id });
@@ -735,23 +826,46 @@ route('POST', '/api/account/photo/remove', ({ user }) => {
   db.audit(user, 'account.photo-removed', { entity: 'user', entityId: user.id });
   return { photoAt: null };
 });
-route('POST', '/api/students/:id', ({ params, body, user }) => records.updateStudent(user, params.id, body));
-route('POST', '/api/students/:id/archive', ({ params, body, user }) => records.setArchived(user, params.id, !!body.archived));
-route('POST', '/api/students/:id/meds', ({ params, body, user }) => records.createMedication(user, params.id, body));
-route('POST', '/api/students/:id/visits', ({ params, body, user }) => records.createVisit(user, params.id, body));
+route('POST', '/api/students/:id', { can: 'edit' }, ({ params, body, user }) => records.updateStudent(user, params.id, body));
+route('POST', '/api/students/:id/archive', { can: 'edit' }, ({ params, body, user }) => records.setArchived(user, params.id, !!body.archived));
+route('POST', '/api/students/:id/meds', { can: 'edit' }, ({ params, body, user }) => records.createMedication(user, params.id, body));
+route('POST', '/api/students/:id/visits', { can: 'visit' }, ({ params, body, user }) => records.createVisit(user, params.id, body));
 
-route('POST', '/api/meds/:id', ({ params, body, user }) => records.updateMedication(user, params.id, body));
-route('POST', '/api/meds/:id/give', ({ params, body, user }) => records.recordGiven(user, params.id, body));
+// Deletes an archived student for good. The admin types the last name to confirm.
+route('POST', '/api/students/:id/delete', { admin: true }, ({ params, body, user }) => {
+  const s = records.student(params.id);
+  if (String(body.confirm || '').trim().toLowerCase() !== s.last_name.toLowerCase()) throw fail(400, `type ${s.last_name} to confirm`);
+  const r = records.purgeStudent(user, params.id);
+  db.vacuum();
+  return r;
+});
+
+route('POST', '/api/students/:id/immunizations', { can: 'edit' }, ({ params, body, user }) => records.createImmunization(user, params.id, body));
+route('POST', '/api/immunizations/:id', { can: 'edit' }, ({ params, body, user }) => records.updateImmunization(user, params.id, body));
+route('POST', '/api/immunizations/:id/delete', { can: 'edit' }, ({ params, user }) => { records.deleteImmunization(user, params.id); return { ok: true }; });
+route('GET', '/api/immunizations/report', ({ query }) => records.immunizationReport({ grade: query.grade || '' }));
+
+// Roster import from a CSV or Excel file (base64). preview only reports what would change.
+const MAX_IMPORT_BODY = 16 * 1024 * 1024;
+route('POST', '/api/import/students', { can: 'edit', maxBody: MAX_IMPORT_BODY }, async ({ body, user }) => {
+  const buf = Buffer.from(String(body.data || ''), 'base64');
+  if (!buf.length) throw fail(400, 'pick a file first');
+  const parsed = await roster.read(buf, String(body.name || ''));
+  return records.importStudents(user, parsed, { apply: !!body.apply, fullRoster: !!body.fullRoster });
+});
+
+route('POST', '/api/meds/:id', { can: 'edit' }, ({ params, body, user }) => records.updateMedication(user, params.id, body));
+route('POST', '/api/meds/:id/give', { can: 'dose' }, ({ params, body, user }) => records.recordGiven(user, params.id, body));
 route('POST', '/api/given/:id/delete', { admin: true }, ({ params, user }) => { records.deleteGiven(user, params.id); return { ok: true }; });
 
-route('POST', '/api/visits/:id', ({ params, body, user }) => records.updateVisit(user, params.id, body));
+route('POST', '/api/visits/:id', { can: 'visit' }, ({ params, body, user }) => records.updateVisit(user, params.id, body));
 route('POST', '/api/visits/:id/delete', { admin: true }, ({ params, user }) => { records.deleteVisit(user, params.id); return { ok: true }; });
 
 route('GET', '/api/visits', ({ query }) => records.visitLog({ ...rangeOf(query), limit: 2000 }));
 route('GET', '/api/given', ({ query }) => records.givenLog({ ...rangeOf(query), limit: 2000 }));
 route('GET', '/api/audit', { admin: true }, ({ query }) => records.auditLog({ ...rangeOf(query), limit: 2000 }));
 
-route('POST', '/api/export', async ({ body, user, res, req }) => {
+route('POST', '/api/export', { can: 'export' }, async ({ body, user, res, req }) => {
   const out = await buildExport(user, body);
   const r = await deliver(user, out, body.target || 'download', body.kind, isRemote(req));
   if (r.download) res.fileDownload = out;
@@ -760,7 +874,7 @@ route('POST', '/api/export', async ({ body, user, res, req }) => {
 
 route('POST', '/api/backup', { admin: true }, async ({ body, user, req }) => {
   db.save();
-  const buf = fs.readFileSync(db.file);
+  const buf = fs.readFileSync(db.file); // sealed when encryption is on
   const target = body.target === 'folder' ? 'folder' : 'saveas';
   return deliver(user, { buf, name: `Nurse-Log-backup_${fileStamp()}.sqlite`, studentId: null }, target, 'backup', isRemote(req));
 });
@@ -819,6 +933,25 @@ route('POST', '/api/account/shortcut', ({ body, user }) => {
   return { dictateKey: key };
 });
 
+// Two-step sign-in with an authenticator app (Settings > My account). allowMustChange
+// also lets someone set it up when an admin requires it before anything else.
+route('POST', '/api/account/totp/start', { allowMustChange: true }, ({ user }) => {
+  const r = auth.startTotp(user.id);
+  return { ...r, rows: qrRows(r.uri) };
+});
+route('POST', '/api/account/totp/confirm', { allowMustChange: true }, ({ body, user }) => {
+  try { auth.confirmTotp(user.id, body.code); } catch (e) { throw fail(400, e.message); }
+  db.audit(user, 'account.2fa-on');
+  return auth.publicUser(auth.user(user.id));
+});
+route('POST', '/api/account/totp/off', { allowMustChange: true }, ({ body, user }) => {
+  if (db.setting('require2fa', false)) throw fail(400, 'an admin requires two-step sign-in for everyone');
+  if (!verify(body.password, user.pass_hash)) throw fail(400, 'password is wrong');
+  auth.clearTotp(user.id);
+  db.audit(user, 'account.2fa-off');
+  return auth.publicUser(auth.user(user.id));
+});
+
 route('POST', '/api/account/recovery', { allowMustChange: true }, ({ body, user }) => {
   if (!verify(body.password, user.pass_hash)) throw fail(400, 'password is wrong');
   const code = auth.newRecoveryCode(user.id);
@@ -851,7 +984,7 @@ route('POST', '/api/users/:id', { admin: true }, ({ params, body, user }) => {
   if (!fullName) throw fail(400, 'enter a full name');
   const e = checkEmail(email);
   if (e) throw fail(400, e);
-  if (!['admin', 'nurse'].includes(role)) throw fail(400, 'bad role');
+  if (!ROLES.includes(role)) throw fail(400, 'bad role');
   if (u.role === 'admin' && (role !== 'admin' || !active)) {
     const admins = db.get("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1").n;
     if (admins <= 1) throw fail(400, 'keep at least one active admin');
@@ -875,6 +1008,36 @@ route('POST', '/api/users/:id/password', { admin: true }, ({ params, body, user 
   return { ok: true };
 });
 
+// For someone who lost the phone with their authenticator app: they sign in with
+// the password alone and set it up again (straight away, when it is required).
+route('POST', '/api/users/:id/totp/reset', { admin: true }, ({ params, user }) => {
+  const u = auth.user(params.id);
+  if (!u) throw fail(404, 'user not found');
+  auth.clearTotp(u.id);
+  auth.endSessionsFor(u.id);
+  db.audit(user, 'user.2fa-reset', { entity: 'user', entityId: u.id, details: u.username });
+  return auth.publicUser(auth.user(u.id));
+});
+
+// End of a contract, or handing the PC on: deletes every record, backup, the
+// encryption key and the settings, and starts again at first-time setup. At the
+// office PC only, with the admin's password and ERASE typed in.
+route('POST', '/api/erase', { admin: true }, async ({ body, user, req, res }) => {
+  if (isRemote(req)) throw fail(400, 'erase from the office PC');
+  if (!verify(body.password, user.pass_hash)) throw fail(400, 'password is wrong');
+  if (String(body.confirm || '').trim() !== 'ERASE') throw fail(400, 'type ERASE to confirm');
+  if ((await httpsInfo()).on) await tailscale.serve(false, PORT).catch(() => {});
+  const who = user.username;
+  db = auth = records = alerts = push = null;
+  Db.erase(DATA_DIR);
+  for (const f of [LOG_FILE, LOG_FILE + '.old']) fs.rmSync(f, { force: true });
+  log(`all records erased by ${who}; starting again at first-time setup`);
+  await openRecords();
+  await syncRemote().catch(() => {});
+  res.extraHeaders = clearCookie;
+  return { erased: true };
+});
+
 route('GET', '/api/settings', { admin: true }, () => ({ settings: settingsPublic(), update: { ...updateState, busy: updateBusy } }));
 
 route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
@@ -886,6 +1049,18 @@ route('POST', '/api/settings', { admin: true }, async ({ body, user, req }) => {
     db.setSetting('auditDays', n);
     changed.auditDays = n;
     db.pruneAudit(n);
+  }
+  if ('purgeYears' in body) {
+    const n = Math.round(Number(body.purgeYears));
+    if (!PURGE_CHOICES.includes(n)) throw fail(400, 'pick how long to keep archived students');
+    db.setSetting('purgeYears', n);
+    changed.purgeYears = n;
+  }
+  if ('require2fa' in body) {
+    const on = !!body.require2fa;
+    if (on && user.totp_on !== '1') throw fail(400, 'turn on two-step sign-in for your own account first (Settings > My account)');
+    db.setSetting('require2fa', on);
+    changed.require2fa = on;
   }
   if ('idleMinutes' in body) {
     const n = Math.round(Number(body.idleMinutes));
@@ -1019,7 +1194,7 @@ route('POST', '/api/settings/test-ai', { admin: true }, async ({ user }) => {
 
 // Dictation: audio (base64) and/or typed notes in, suggested form values out.
 // Nothing is saved; the nurse checks the form and saves it as usual.
-route('POST', '/api/ai/fill', { maxBody: MAX_AUDIO_BODY }, async ({ body, user, req }) => {
+route('POST', '/api/ai/fill', { maxBody: MAX_AUDIO_BODY, can: 'dictate' }, async ({ body, user, req }) => {
   const a = aiSettings();
   if (!ai.configured(a)) throw fail(400, 'the dictation assistant is not set up; an admin can turn it on in Settings > Dictation & ChatGPT');
   let transcript = '';
@@ -1084,13 +1259,16 @@ async function handle(req, res) {
   const m = r.re.exec(url.pathname);
   const params = { id: m[1] ? Number(m[1]) : null };
 
+  if (!db && !r.locked) return send(res, 503, { error: 'the records are locked; enter the records recovery key at the office PC' });
   const token = cookieToken(req);
-  const user = auth.session(token, !r.idle);
+  const user = db ? auth.session(token, !r.idle) : null;
   try {
     if (!r.open) {
       if (!user) throw fail(401, 'signed out');
       if (user.must_change && !r.allowMustChange) throw fail(403, 'change your password first');
+      if (!r.allowMustChange && user.totp_on !== '1' && db.setting('require2fa', false)) throw fail(403, 'set up two-step sign-in first');
       if (r.admin && user.role !== 'admin') throw fail(403, 'admins only');
+      if (r.can && !can(user, r.can)) throw fail(403, `your role (${user.role}) cannot do that`);
     }
     const body = req.method === 'POST' ? await readBody(req, r.maxBody) : {};
     const out = await r.fn({ body, query: Object.fromEntries(url.searchParams), params, user, token, res, req });
@@ -1129,11 +1307,7 @@ server.on('error', (e) => {
 });
 
 (async () => {
-  db = await Db.open(DATA_DIR);
-  auth = new Auth(db);
-  records = new Records(db);
-  push = new Push(db, log);
-  alerts = new Alerts(db, records, sendAlerts);
+  await openRecords();
   server.listen(PORT, HOST);
   const syncSafe = () => syncRemote().catch((e) => log(`remote access: ${e.message}`));
   server.once('listening', syncSafe); // after the main port is ours, so an old copy still shutting down is not raced
@@ -1142,9 +1316,17 @@ server.on('error', (e) => {
     setTimeout(() => checkForUpdate().catch(() => {}), 15000);
     setInterval(() => checkForUpdate().catch(() => {}), 6 * 60 * 60 * 1000).unref();
   }
-  setInterval(() => { try { db.backup(); } catch (e) { log(`backup failed: ${e.message}`); } }, 60 * 60 * 1000).unref();
-  setInterval(() => alerts.tick().catch((e) => log(`reminders failed: ${e.message}`)), 30 * 1000).unref();
-  const prune = () => { try { db.pruneAudit(db.setting('auditDays', AUDIT_DAYS)); } catch (e) { log(`audit prune failed: ${e.message}`); } };
+  setInterval(() => { try { if (db) db.backup(); } catch (e) { log(`backup failed: ${e.message}`); } }, 60 * 60 * 1000).unref();
+  setInterval(() => { if (alerts) alerts.tick().catch((e) => log(`reminders failed: ${e.message}`)); }, 30 * 1000).unref();
+  // Hourly upkeep: trim the audit log, and delete archived students past the retention period.
+  const prune = () => {
+    if (!db) return;
+    try { db.pruneAudit(db.setting('auditDays', AUDIT_DAYS)); } catch (e) { log(`audit prune failed: ${e.message}`); }
+    try {
+      const n = records.purgeExpired(db.setting('purgeYears', 0));
+      if (n) log(`retention: deleted ${n} archived student${n === 1 ? '' : 's'}`);
+    } catch (e) { log(`retention failed: ${e.message}`); }
+  };
   prune();
   setInterval(prune, 60 * 60 * 1000).unref();
 })().catch((e) => {

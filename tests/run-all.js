@@ -19,6 +19,8 @@ const excel = require('../lib/excel');
 const updater = require('../lib/updater');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nurse-log-test-'));
+// The data key in plain files here; one test below checks the real DPAPI keystore.
+process.env.NL_KEYSTORE = 'file';
 const results = [];
 async function test(name, fn) {
   try {
@@ -247,15 +249,183 @@ async function unit() {
     assert.strictEqual(fs.readdirSync(path.join(tmp, 'unit', 'backups')).length, 1);
   });
 
+  await test('two-step codes: RFC 6238 test vector, one use per code, recovery code works', () => {
+    const totp = require('../lib/totp');
+    const secret = totp.base32(Buffer.from('12345678901234567890'));
+    assert.strictEqual(secret, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+    assert.strictEqual(totp.codeAt(secret, 1), '287082', 'RFC 6238 at T=59s');
+    assert.strictEqual(totp.verify(secret, '287082', { now: 59000 }), 1);
+    assert.strictEqual(totp.verify(secret, '287082', { now: 59000, after: 1 }), null, 'a used code is refused');
+    const u = auth.createUser({ username: 'twostep', fullName: 'Two Step', email: 'ts@example.org', password: PW });
+    const { secret: s2 } = auth.startTotp(u.user.id);
+    assert.throws(() => auth.confirmTotp(u.user.id, '000000'), /does not match/);
+    auth.confirmTotp(u.user.id, totp.codeAt(s2, totp.stepNow()));
+    const first = auth.login('twostep', PW);
+    assert(first.needCode && first.ticket && !first.token, 'the password alone does not sign in');
+    assert.match(auth.loginCode(first.ticket, '123456').error, /wrong code/);
+    assert.match(auth.loginCode(first.ticket, totp.codeAt(s2, totp.stepNow())).error, /wrong code/, 'the code used to set it up cannot be used again');
+    assert.strictEqual(auth.loginCode(first.ticket, u.recovery).how, 'recovery');
+    assert.match(auth.loginCode(first.ticket, u.recovery).error, /password again/, 'a ticket works once');
+    const again = auth.login('twostep', PW);
+    for (let i = 0; i < 4; i++) auth.loginCode(again.ticket, '000000');
+    assert(auth.loginCode(again.ticket, '000000').restart, 'five wrong codes end the ticket');
+    auth.clearTotp(u.user.id);
+    assert(auth.login('twostep', PW).token, 'with it off the password is enough');
+  });
+
+  await test('roles: aides record doses and visits, viewers only read', () => {
+    const { can } = require('../lib/auth');
+    assert(can({ role: 'nurse' }, 'export') && can({ role: 'admin' }, 'edit'));
+    assert(can({ role: 'aide' }, 'dose') && can({ role: 'aide' }, 'visit') && !can({ role: 'aide' }, 'edit') && !can({ role: 'aide' }, 'export'));
+    assert(!can({ role: 'viewer' }, 'dose') && !can({ role: 'viewer' }, 'dictate') && !can(null, 'dose'));
+    assert(auth.createUser({ username: 'aide1', fullName: 'Ann Aide', email: 'a@example.org', password: PW, role: 'aide' }).user);
+    assert.throws(() => auth.createUser({ username: 'boss1', fullName: 'B', email: 'b@example.org', password: PW, role: 'superuser' }), /bad role/);
+  });
+
+  await test('immunizations: doses, status, compliance report', () => {
+    const s = rec.createStudent(admin, { first_name: 'Ivy', last_name: 'Imm', grade: '6', student_no: 'IMM1' });
+    assert.throws(() => rec.updateStudent(admin, s.id, { imm_status: 'Mostly' }), /immunization status/);
+    rec.updateStudent(admin, s.id, { imm_status: 'In progress', imm_notes: 'Tdap due' });
+    const d1 = rec.createImmunization(admin, s.id, { vaccine: 'MMR', dose_no: '1', given_on: '2016-05-01' });
+    rec.createImmunization(admin, s.id, { vaccine: 'MMR', dose_no: '2', given_on: '2019-06-01' });
+    assert.throws(() => rec.createImmunization(admin, s.id, { vaccine: 'MMR', given_on: '5/1/2016' }), /date given/);
+    assert.throws(() => rec.createImmunization(admin, s.id, { given_on: '2016-05-01' }), /vaccine/);
+    rec.updateImmunization(admin, d1.id, { source: 'State registry' });
+    assert.strictEqual(rec.board(admin, s.id).immunizations.length, 2);
+    const r = rec.immunizationReport({ grade: '6' });
+    const row = r.students.find((x) => x.id === s.id);
+    assert.deepStrictEqual(row.doses.MMR, ['2016-05-01', '2019-06-01']);
+    assert.strictEqual(r.counts['In progress'], 1);
+    assert(r.vaccines.includes('DTaP / Tdap'));
+  });
+
+  await test('roster import: matches by ID or name and birth date, never blanks a value, full roster archives the rest', async () => {
+    const roster = require('../lib/roster');
+    // Its own records file, since a full roster archives everyone else.
+    const rec = new Records(await Db.open(path.join(tmp, 'roster')));
+    const before = rec.createStudent(admin, { first_name: 'Rosa', last_name: 'Ster', student_no: 'R100', allergies: 'Peanuts', grade: '3' });
+    const noId = rec.createStudent(admin, { first_name: 'Nia', last_name: 'Noid', dob: '2015-02-03' });
+    const leaving = rec.createStudent(admin, { first_name: 'Leo', last_name: 'Left', student_no: 'R999' });
+    const csv = [
+      'School roster export',
+      'Student Number,Last Name,First Name,Birthdate,Grade Level,Homeroom Teacher,Gender,Parent Phone,Allergies',
+      'R100,Ster,Rosa,9/30/2016,4,Ms. Lee,Female,555-201-3344,',
+      'R200,"New, Jr.",Ned,2016-01-02,K,Mr. Park,M,12345,',
+      'R300,Noid,Nia,02/03/2015,2,,F,,',
+      ',Nobody,,,,,,,',
+      'R200,Twice,Tom,,1,,,,',
+    ].join('\r\n');
+    const parsed = await roster.read(Buffer.from(csv), 'roster.csv');
+    assert(parsed.columns.includes('dob') && parsed.columns.includes('homeroom') && parsed.columns.includes('guardian_phone'));
+    const plan = rec.importStudents(admin, parsed, { fullRoster: true });
+    assert.strictEqual(plan.applied, undefined, 'preview changes nothing');
+    assert.strictEqual(rec.student(before.id).grade, '3');
+    assert.strictEqual(plan.create, 1, 'Ned is new');
+    assert.strictEqual(plan.update, 2, 'Rosa by ID, Nia by name and birth date');
+    assert(plan.archive >= 1 && plan.archiveNames.includes('Left, Leo'));
+    assert(plan.errors.some((e) => e.line === 6) && plan.errors.some((e) => /twice/.test(e.msg)));
+    assert(plan.notes.some((n) => /not 10 digits/.test(n.msg)));
+    const done = rec.importStudents(admin, parsed, { apply: true, fullRoster: true });
+    assert(done.applied);
+    const rosa = rec.student(before.id);
+    assert.strictEqual(rosa.grade, '4');
+    assert.strictEqual(rosa.dob, '2016-09-30');
+    assert.strictEqual(rosa.sex, 'F');
+    assert.strictEqual(rosa.guardian_phone, '(555) 201-3344');
+    assert.strictEqual(rosa.allergies, 'Peanuts', 'a blank cell never clears a value');
+    assert.strictEqual(rec.student(noId.id).student_no, 'R300');
+    assert.strictEqual(rec.student(leaving.id).archived, 1);
+    assert(rec.searchStudents({ q: 'Ned' }).some((x) => x.last_name === 'New, Jr.'));
+    assert.strictEqual(rec.importStudents(admin, parsed, { fullRoster: true }).update, 0, 'importing the same file again changes nothing');
+    await assert.rejects(roster.read(Buffer.from('a,b\n1,2'), 'x.csv'), /First name and Last name/);
+    await assert.rejects(roster.read(Buffer.from('x'), 'old.xls'), /\.xls/);
+  });
+
+  await test('retention: archived students are deleted for good after the chosen years', () => {
+    const s = rec.createStudent(admin, { first_name: 'Old', last_name: 'Timer', student_no: 'OT1' });
+    rec.createVisit(admin, s.id, { complaint: 'Headache' });
+    rec.createImmunization(admin, s.id, { vaccine: 'MMR', given_on: '2010-01-01' });
+    assert.throws(() => rec.purgeStudent(admin, s.id), /archive the student first/);
+    rec.setArchived(admin, s.id, true);
+    assert.deepStrictEqual(rec.purgeDue(1).filter((id) => id === s.id), [], 'archived today is kept');
+    const fourYears = Date.now() + 4 * 366 * 24 * 60 * 60 * 1000;
+    assert(rec.purgeDue(3, fourYears).includes(s.id));
+    db.run('UPDATE students SET archived_at = ? WHERE id = ?', [String(Date.now() - 4 * 366 * 24 * 60 * 60 * 1000), s.id]);
+    assert(rec.purgeExpired(3) >= 1);
+    assert.throws(() => rec.student(s.id), /not found/);
+    assert.strictEqual(db.get('SELECT COUNT(*) AS n FROM visits WHERE student_id = ?', [s.id]).n, 0);
+    assert.strictEqual(db.get('SELECT COUNT(*) AS n FROM immunizations WHERE student_id = ?', [s.id]).n, 0);
+    const trail = db.all('SELECT * FROM audit WHERE student_id = ? ORDER BY id', [s.id]);
+    assert(trail.length > 2, 'who did what is kept');
+    assert(trail.slice(0, -1).every((a) => a.details === null), 'but not the health details');
+    assert.strictEqual(trail[trail.length - 1].action, 'student.delete-retention');
+    assert.strictEqual(rec.purgeExpired(0), 0, 'off keeps everyone');
+  });
+
+  await test('encryption at rest: sealed file and backups, wrong key refused, recovery key reopens', async () => {
+    const vault = require('../lib/vault');
+    const dir = path.join(tmp, 'sealed');
+    const d1 = await Db.open(dir);
+    d1.setSetting('schoolName', 'Secret Elementary');
+    assert(!d1.encrypted);
+    assert.match(fs.readFileSync(d1.file).subarray(0, 16).toString(), /^SQLite format 3/);
+    const code = d1.encrypt();
+    assert.match(code, /^([A-Z0-9]{4}-){5}[A-Z0-9]{4}$/);
+    const raw = fs.readFileSync(d1.file);
+    assert(vault.isSealed(raw) && !raw.includes(Buffer.from('Secret Elementary')), 'nothing readable on disk');
+    for (const f of fs.readdirSync(path.join(dir, 'backups'))) assert(vault.isSealed(fs.readFileSync(path.join(dir, 'backups', f))), 'older backups are sealed too');
+    d1.setSetting('after', 1);
+    assert.strictEqual((await Db.open(dir)).setting('schoolName'), 'Secret Elementary', 'reopens with the key on this PC');
+    const tampered = Buffer.from(raw);
+    tampered[tampered.length - 5] ^= 1;
+    fs.writeFileSync(path.join(tmp, 'tampered.sqlite'), tampered);
+    assert.throws(() => vault.unseal(tampered, vault.loadKey(dir)), /authenticate|auth/i, 'a changed byte is caught');
+    // Another PC: the file without its key file.
+    const moved = path.join(tmp, 'sealed-moved');
+    fs.mkdirSync(moved);
+    fs.copyFileSync(d1.file, path.join(moved, 'nurse-log.sqlite'));
+    await assert.rejects(Db.open(moved), (e) => e.locked);
+    assert.throws(() => Db.unlock(moved, 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF'), /does not open/);
+    Db.unlock(moved, code.toLowerCase().replace(/-/g, ' '));
+    assert.strictEqual((await Db.open(moved)).setting('after'), 1);
+    // A new recovery key: the new one opens the file, the old one only older copies.
+    const code2 = d1.encrypt();
+    assert.notStrictEqual(code2, code);
+    const h2 = vault.headerOf(fs.readFileSync(d1.file)).header;
+    assert(vault.keyFromRecovery(h2, code2) && !vault.keyFromRecovery(h2, code));
+    Db.erase(dir);
+    assert(!fs.existsSync(path.join(dir, 'nurse-log.sqlite')) && !fs.existsSync(path.join(dir, 'records.key')) && !fs.existsSync(path.join(dir, 'backups')));
+  });
+
+  if (process.platform === 'win32') {
+    await test('encryption at rest: the key file is locked to this Windows user (DPAPI)', () => {
+      const vault = require('../lib/vault');
+      const dir = path.join(tmp, 'dpapi');
+      fs.mkdirSync(dir);
+      const was = process.env.NL_KEYSTORE;
+      process.env.NL_KEYSTORE = 'dpapi';
+      try {
+        const key = require('crypto').randomBytes(32);
+        vault.saveKey(dir, key);
+        const body = JSON.parse(fs.readFileSync(path.join(dir, 'records.key'), 'utf8'));
+        assert.strictEqual(body.kind, 'dpapi');
+        assert.notStrictEqual(body.key, key.toString('base64'), 'the key is not stored as is');
+        assert(vault.loadKey(dir).equals(key));
+      } finally {
+        if (was === undefined) delete process.env.NL_KEYSTORE; else process.env.NL_KEYSTORE = was;
+      }
+    });
+  }
+
   await test('excel workbook builds', async () => {
-    const s = rec.searchStudents({})[0];
+    const s = rec.searchStudents({ q: 'S100' })[0]; // Ana Lopez, with the Headache visit
     const b = rec.board(admin, s.id);
     const buf = await excel.build('student', b, { by: 'Pat Nurse (nurse1)', at: Date.now() });
     assert.strictEqual(buf.slice(0, 2).toString(), 'PK');
     const ExcelJS = require('exceljs');
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf);
-    assert.deepStrictEqual(wb.worksheets.map((w) => w.name), ['Student', 'Medications', 'Medication log', 'Visits']);
+    assert.deepStrictEqual(wb.worksheets.map((w) => w.name), ['Student', 'Medications', 'Medication log', 'Visits', 'Immunizations']);
     assert.match(String(wb.worksheets[0].getCell('A1').value), /CONFIDENTIAL.*Pat Nurse/);
     assert.strictEqual(wb.getWorksheet('Visits').getCell('E3').value, 'Headache');
   });
@@ -350,9 +520,15 @@ function req(method, url, body, { headers = {}, raw = false, ip = '127.0.0.1', f
 // Copies installed from Setup.exe: update check and download against a fake GitHub.
 async function setupUpdaterTests() {
   const updater = require('../lib/updater');
+  const crypto = require('crypto');
   const exe = Buffer.from('fake installer');
-  const good = require('crypto').createHash('sha256').update(exe).digest('hex');
+  const good = crypto.createHash('sha256').update(exe).digest('hex');
   let sum = good;
+  // A throwaway release key; the real public key stays in lib/release-key.js.
+  const keys = crypto.generateKeyPairSync('ed25519');
+  const other = crypto.generateKeyPairSync('ed25519');
+  let sig = crypto.sign(null, exe, keys.privateKey).toString('base64');
+  let withSig = true;
   const srv = http.createServer((q, s) => {
     const base = `http://127.0.0.1:${srv.address().port}`;
     if (q.url === '/latest') {
@@ -360,15 +536,18 @@ async function setupUpdaterTests() {
       return s.end(JSON.stringify({ tag_name: 'v9.9.9', assets: [
         { name: 'NursesLog-Setup-9.9.9.exe', browser_download_url: `${base}/dl/setup.exe` },
         { name: 'NursesLog-Setup-9.9.9.exe.sha256', browser_download_url: `${base}/dl/setup.sha256` },
+        ...(withSig ? [{ name: 'NursesLog-Setup-9.9.9.exe.sig', browser_download_url: `${base}/dl/setup.sig` }] : []),
       ] }));
     }
     if (q.url === '/dl/setup.exe') { s.writeHead(302, { Location: '/files/setup.exe' }); return s.end(); }
     if (q.url === '/files/setup.exe') return s.end(exe);
     if (q.url === '/dl/setup.sha256') return s.end(`${sum}  NursesLog-Setup-9.9.9.exe\n`);
+    if (q.url === '/dl/setup.sig') return s.end(`${sig}\n`);
     s.writeHead(404); s.end();
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   process.env.NL_RELEASES_URL = `http://127.0.0.1:${srv.address().port}`;
+  process.env.NL_RELEASE_PUBKEY = keys.publicKey.export({ type: 'spki', format: 'pem' });
   const appDir = path.join(tmp, 'setup-app');
   fs.mkdirSync(appDir, { recursive: true });
   fs.writeFileSync(path.join(appDir, '.setup'), 'x');
@@ -384,10 +563,169 @@ async function setupUpdaterTests() {
       await assert.rejects(updater.install(appDir, 'v9.9.8'), /newest release is now v9\.9\.9/);
       sum = '0'.repeat(64);
       await assert.rejects(updater.install(appDir, 'v9.9.9'), /checksum/);
+      sum = good;
+    });
+    await test('setup.exe copies: an unsigned or wrongly signed installer is never run', async () => {
+      withSig = false;
+      await assert.rejects(updater.install(appDir, 'v9.9.9'), /not signed/);
+      withSig = true;
+      sig = crypto.sign(null, exe, other.privateKey).toString('base64');
+      await assert.rejects(updater.install(appDir, 'v9.9.9'), /not signed by/);
+      sig = crypto.sign(null, exe, keys.privateKey).toString('base64');
+      assert(await updater.install(appDir, 'v9.9.9'));
+      delete process.env.NL_RELEASE_PUBKEY;
+      await assert.rejects(updater.install(appDir, 'v9.9.9'), /not signed by/, 'the real key does not accept a test signature');
     });
   } finally {
     delete process.env.NL_RELEASES_URL;
+    delete process.env.NL_RELEASE_PUBKEY;
     srv.close();
+  }
+}
+
+// Encryption, roles, two-step sign-in, import, deleting and erasing over HTTP, on a
+// server and records folder of their own.
+const SR_PORT = 8946;
+async function startServer(dataDir, port) {
+  const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+    env: { ...process.env, NL_PORT: String(port), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_KEYSTORE: 'file', NL_MAIL_RELAY: '' },
+    stdio: 'ignore', windowsHide: true,
+  });
+  for (let i = 0; i < 100; i++) {
+    try { if ((await req('GET', '/api/ping', null, { port })).json?.app === 'nurse-log') break; } catch { /* starting */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return child;
+}
+
+async function schoolReadyTests() {
+  const totp = require('../lib/totp');
+  const vault = require('../lib/vault');
+  const dataDir = path.join(tmp, 'school-ready');
+  const call = (m, u, b, o = {}) => req(m, u, b, { ...o, port: SR_PORT });
+  const as = async (username, password) => { cookie = ''; return call('POST', '/api/login', { username, password }); };
+  cookie = '';
+  let child = await startServer(dataDir, SR_PORT);
+  try {
+    let recordsKey;
+    await test('http: a new install encrypts its records and shows the records recovery key once', async () => {
+      const r = await call('POST', '/api/setup', { schoolName: 'Sealed School', username: 'boss', fullName: 'Bo Boss', email: 'bo@example.org', password: PW });
+      assert.strictEqual(r.status, 200, JSON.stringify(r.json));
+      recordsKey = r.json.recordsKey;
+      assert.match(recordsKey, /^([A-Z0-9]{4}-){5}[A-Z0-9]{4}$/);
+      assert.strictEqual((await call('GET', '/api/state')).json.encrypted, true);
+      const raw = fs.readFileSync(path.join(dataDir, 'nurse-log.sqlite'));
+      assert(vault.isSealed(raw) && !raw.includes(Buffer.from('Sealed School')));
+      assert.strictEqual((await call('POST', '/api/records/encrypt', { password: 'wrong' })).status, 400);
+    });
+
+    let sid;
+    let medId;
+    await test('http: roles: an aide records doses and visits only, a viewer only reads', async () => {
+      sid = (await call('POST', '/api/students', { first_name: 'Rita', last_name: 'Role', student_no: 'RR1' })).json.id;
+      medId = (await call('POST', `/api/students/${sid}/meds`, { name: 'Albuterol', times: '10:00' })).json.id;
+      for (const [username, role] of [['aide1', 'aide'], ['view1', 'viewer']]) {
+        assert.strictEqual((await call('POST', '/api/users', { username, fullName: username, email: `${username}@example.org`, password: 'Temporary 123', role })).status, 200);
+      }
+      assert.strictEqual((await call('POST', '/api/users', { username: 'x9', fullName: 'x', email: 'x9@example.org', password: 'Temporary 123', role: 'owner' })).status, 400);
+      const boss = cookie;
+      await as('aide1', 'Temporary 123');
+      await call('POST', '/api/account/password', { current: 'Temporary 123', next: 'Aide own pass 9' });
+      assert.deepStrictEqual((await call('GET', '/api/state')).json.user.perms, ['dose', 'visit', 'dictate']);
+      assert.strictEqual((await call('GET', `/api/students/${sid}`)).status, 200);
+      assert.strictEqual((await call('POST', `/api/meds/${medId}/give`, { scheduled: '10:00' })).status, 200);
+      assert.strictEqual((await call('POST', `/api/students/${sid}/visits`, { complaint: 'Cough' })).status, 200);
+      for (const [u, b] of [['/api/students', { first_name: 'A', last_name: 'B' }], [`/api/students/${sid}`, { allergies: 'x' }], [`/api/students/${sid}/meds`, { name: 'x' }],
+        [`/api/meds/${medId}`, { dose: '9' }], ['/api/export', { kind: 'students', target: 'download' }], ['/api/import/students', { name: 'a.csv', data: 'eA==' }],
+        [`/api/students/${sid}/immunizations`, { vaccine: 'MMR' }]]) {
+        const r = await call('POST', u, b);
+        assert.strictEqual(r.status, 403, `aide ${u}`);
+        assert.match(r.json.error, /role \(aide\)/);
+      }
+      await as('view1', 'Temporary 123');
+      await call('POST', '/api/account/password', { current: 'Temporary 123', next: 'View own pass 9' });
+      assert.strictEqual((await call('GET', '/api/today')).status, 200);
+      assert.strictEqual((await call('GET', `/api/students/${sid}`)).status, 200);
+      for (const [u, b] of [[`/api/meds/${medId}/give`, {}], [`/api/students/${sid}/visits`, { complaint: 'x' }], ['/api/ai/fill', { notes: 'x' }], ['/api/export', { kind: 'visits', target: 'download' }]]) {
+        assert.strictEqual((await call('POST', u, b)).status, 403, `viewer ${u}`);
+      }
+      cookie = boss;
+    });
+
+    let secret;
+    await test('http: two-step sign-in: password then code, and an admin can require it', async () => {
+      assert.match((await call('POST', '/api/settings', { require2fa: true })).json.error, /your own account first/);
+      const st = (await call('POST', '/api/account/totp/start')).json;
+      secret = st.secret;
+      assert(st.uri.startsWith('otpauth://totp/') && st.rows.length > 20);
+      assert.strictEqual((await call('POST', '/api/account/totp/confirm', { code: '000000' })).status, 400);
+      assert.strictEqual((await call('POST', '/api/account/totp/confirm', { code: totp.codeAt(secret, totp.stepNow()) })).json.totpOn, true);
+      assert.strictEqual((await call('POST', '/api/settings', { require2fa: true })).status, 200);
+      const first = await as('boss', PW);
+      assert(first.json.needCode && first.json.ticket);
+      assert.strictEqual((await call('GET', '/api/state')).json.user, null, 'not signed in yet');
+      assert.strictEqual((await call('POST', '/api/login/code', { ticket: first.json.ticket, code: '111111' })).status, 401);
+      const ok = await call('POST', '/api/login/code', { ticket: first.json.ticket, code: totp.codeAt(secret, totp.stepNow() + 1) });
+      assert.strictEqual(ok.status, 200, JSON.stringify(ok.json));
+      const boss = cookie;
+      await as('aide1', 'Aide own pass 9');
+      assert.match((await call('GET', '/api/students')).json.error, /two-step/);
+      assert.strictEqual((await call('POST', '/api/account/totp/start')).status, 200, 'setting it up is allowed');
+      cookie = boss;
+      const aide = (await call('GET', '/api/users')).json.find((u) => u.username === 'aide1');
+      assert.strictEqual((await call('POST', `/api/users/${aide.id}/totp/reset`)).status, 200);
+      assert.match((await call('POST', '/api/account/totp/off', { password: PW })).json.error, /requires/);
+      assert.strictEqual((await call('POST', '/api/settings', { require2fa: false })).status, 200);
+      assert.strictEqual((await call('POST', '/api/account/totp/off', { password: PW })).json.totpOn, false);
+    });
+
+    await test('http: roster import preview then apply; delete an archived student for good', async () => {
+      const csv = 'Student ID,First Name,Last Name,Grade\nRR1,Rita,Role,7\nRR2,Sam,Second,7\n';
+      const data = Buffer.from(csv).toString('base64');
+      const p = (await call('POST', '/api/import/students', { name: 'r.csv', data })).json;
+      assert.strictEqual(p.create, 1);
+      assert.strictEqual(p.update, 1);
+      assert.strictEqual((await call('GET', '/api/students?q=Second')).json.students.length, 0, 'preview saves nothing');
+      assert((await call('POST', '/api/import/students', { name: 'r.csv', data, apply: true })).json.applied);
+      const sam = (await call('GET', '/api/students?q=Second')).json.students[0];
+      assert(sam && sam.grade === '7');
+      assert.match((await call('POST', `/api/students/${sam.id}/delete`, { confirm: 'Second' })).json.error, /archive/);
+      await call('POST', `/api/students/${sam.id}/archive`, { archived: true });
+      assert.match((await call('POST', `/api/students/${sam.id}/delete`, { confirm: 'Sam' })).json.error, /type Second/);
+      assert.strictEqual((await call('POST', `/api/students/${sam.id}/delete`, { confirm: 'second' })).status, 200);
+      assert.strictEqual((await call('GET', `/api/students/${sam.id}`)).status, 404);
+      const rep = await call('POST', '/api/export', { kind: 'immunizations', target: 'download' }, { raw: true });
+      assert.strictEqual(rep.buf.slice(0, 2).toString(), 'PK');
+    });
+
+    await test('http: on another Windows account the records stay locked until the recovery key is typed', async () => {
+      child.kill();
+      await new Promise((r) => setTimeout(r, 400));
+      fs.rmSync(path.join(dataDir, 'records.key'));
+      child = await startServer(dataDir, SR_PORT);
+      assert.strictEqual((await call('GET', '/api/state')).json.locked, true);
+      assert.strictEqual((await call('GET', '/api/students')).status, 503);
+      assert.strictEqual((await call('POST', '/api/login', { username: 'boss', password: PW })).status, 503);
+      assert.match((await call('POST', '/api/unlock', { key: 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF' })).json.error, /does not open/);
+      assert.strictEqual((await call('POST', '/api/unlock', { key: recordsKey })).status, 200);
+      const st = (await call('GET', '/api/state')).json;
+      assert(!st.locked && !st.needsSetup && st.encrypted);
+      assert((await as('boss', PW)).json.user);
+      assert.strictEqual((await call('GET', '/api/students?q=Rita')).json.students.length, 1);
+    });
+
+    await test('http: erase everything starts over at first-time setup', async () => {
+      assert.match((await call('POST', '/api/erase', { password: PW, confirm: 'erase' })).json.error, /ERASE/);
+      assert.match((await call('POST', '/api/erase', { password: 'nope', confirm: 'ERASE' })).json.error, /password/);
+      assert.strictEqual((await call('POST', '/api/erase', { password: PW, confirm: 'ERASE' })).status, 200);
+      assert.strictEqual((await call('GET', '/api/state')).json.needsSetup, true);
+      assert(!fs.existsSync(path.join(dataDir, 'records.key')));
+      const left = fs.readdirSync(path.join(dataDir, 'backups'));
+      for (const f of left) assert(!fs.readFileSync(path.join(dataDir, 'backups', f)).includes(Buffer.from('Rita')), 'no old backup survives');
+    });
+  } finally {
+    child.kill();
+    cookie = '';
   }
 }
 
@@ -396,7 +734,7 @@ async function httpTests() {
   const exportDir = path.join(tmp, 'exports');
   fs.mkdirSync(exportDir);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_TAILSCALE_IPS: TS_IP, NL_TAILSCALE_DNS: TS_DNS, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1`, NL_MAIL_RELAY: '' },
+    env: { ...process.env, NL_PORT: String(PORT), NL_DATA: dataDir, NL_NO_DIALOGS: '1', NL_NO_UPDATE_CHECK: '1', NL_KEYSTORE: 'file', NL_TAILSCALE_IPS: TS_IP, NL_TAILSCALE_DNS: TS_DNS, NL_OPENAI_URL: `http://127.0.0.1:${AI_PORT}/v1`, NL_MAIL_RELAY: '' },
     stdio: 'ignore', windowsHide: true,
   });
   const openai = await fakeOpenAI();
@@ -855,6 +1193,7 @@ async function relayTests() {
   await unit();
   await setupUpdaterTests();
   await httpTests();
+  await schoolReadyTests();
   await relayTests();
   let failed = 0;
   for (const [ok, name, e] of results) {

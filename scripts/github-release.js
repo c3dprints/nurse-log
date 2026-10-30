@@ -2,7 +2,7 @@
 // Makes the GitHub releases for a pushed tag:
 //  - in this (private) repo, with that version's CHANGELOG.md notes and the
 //    one-click Git installer (scripts/Install-NursesLog.cmd);
-//  - in the public download repo, with NursesLog-Setup-X.Y.Z.exe and its .sha256,
+//  - in the public download repo, with NursesLog-Setup-X.Y.Z.exe, its .sha256 and .sig,
 //    which installed copies update from (lib/updater.js).
 // `npm run release` calls it; `node scripts/github-release.js v1.2.3 [--setup-only]` redoes one by hand.
 
@@ -41,9 +41,9 @@ function ghRelease(args, notes) {
 
 async function publishSetup(tag) {
   const version = tag.replace(/^v/, '');
-  const { exe, sum, version: built } = await require('./build-setup').build();
+  const { exe, sum, sig, version: built } = await require('./build-setup').build();
   if (built !== version) throw new Error(`package.json is ${built}, not ${version}; check out ${tag} first`);
-  ghRelease([tag, exe, sum, '--repo', PUBLIC_REPO, '--latest', '--title', `Nurse's Log ${version}`], publicNotes(version));
+  ghRelease([tag, exe, sum, sig, '--repo', PUBLIC_REPO, '--latest', '--title', `Nurse's Log ${version}`], publicNotes(version));
 }
 
 async function publish(tag, { setupOnly = false } = {}) {

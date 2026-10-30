@@ -87,7 +87,21 @@ async function build() {
   const exe = path.join(DIST, `NursesLog-Setup-${version}.exe`);
   const sum = `${exe}.sha256`;
   fs.writeFileSync(sum, `${sha256(fs.readFileSync(exe))}  ${path.basename(exe)}\n`);
-  return { exe, sum, version };
+  const sig = `${exe}.sig`;
+  fs.writeFileSync(sig, signRelease(fs.readFileSync(exe)) + '\n');
+  return { exe, sum, sig, version };
+}
+
+// Installed copies refuse an update without a valid .sig (lib/release-key.js).
+// The private key lives only on the release PC; back it up somewhere safe, since a
+// lost key means a new one has to ship in a release signed with the old one.
+const SIGNING_KEY = process.env.NL_SIGNING_KEY || path.join(require('os').homedir(), '.nurse-log', 'release-signing-key.pem');
+function signRelease(buf) {
+  if (!fs.existsSync(SIGNING_KEY)) throw new Error(`the release signing key is missing (${SIGNING_KEY}); restore it from the backup`);
+  const key = crypto.createPrivateKey(fs.readFileSync(SIGNING_KEY));
+  const sig = crypto.sign(null, buf, key);
+  if (!require('../lib/release-key').verifyRelease(buf, sig.toString('base64'))) throw new Error('the signing key does not match the public key in lib/release-key.js');
+  return sig.toString('base64');
 }
 
 module.exports = { build };

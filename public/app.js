@@ -113,10 +113,26 @@ function reauth() {
     const err = errBox();
     const byPin = !!(S.device && S.device.username === S.user.username);
     const pw = byPin ? pinInput() : h('input', { type: 'password', autocomplete: 'current-password' });
+    const label = h('label', {}, byPin ? 'PIN' : 'Password');
+    let ticket = null; // two-step sign-in: the password was right, now the code
     const submit = async () => {
       try {
         if (byPin) await api('POST', '/api/login/pin', { pin: pw.value }, { noReauth: true });
-        else await api('POST', '/api/login', { username: S.user.username, password: pw.value }, { noReauth: true });
+        else if (ticket) await api('POST', '/api/login/code', { ticket, code: pw.value }, { noReauth: true });
+        else {
+          const r = await api('POST', '/api/login', { username: S.user.username, password: pw.value }, { noReauth: true });
+          if (r.needCode) {
+            ticket = r.ticket;
+            label.textContent = 'Code from your authenticator app';
+            pw.type = 'text';
+            pw.setAttribute('inputmode', 'numeric');
+            pw.setAttribute('autocomplete', 'one-time-code');
+            pw.value = '';
+            err.classList.add('hidden');
+            pw.focus();
+            return;
+          }
+        }
         m.close();
         reauthing = null;
         lastActive = Date.now();
@@ -124,6 +140,12 @@ function reauth() {
       } catch (e) {
         showErr(err, e.message);
         pw.value = '';
+        if (ticket && /password again/.test(e.message)) {
+          ticket = null;
+          label.textContent = 'Password';
+          pw.type = 'password';
+          pw.setAttribute('autocomplete', 'current-password');
+        }
         // The phone was forgotten (too many wrong PINs): ask for the password instead.
         if (byPin && /password/.test(e.message)) { S.device = null; m.close(); reauthing = null; reauth().then(resolve, reject); }
       }
@@ -131,7 +153,7 @@ function reauth() {
     pw.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     const m = modal('You were signed out', [
       h('p', { class: 'muted' }, `Nurse’s Log signs out after ${S.idleMinutes} idle minutes. ${byPin ? 'Enter your PIN' : `Sign in again as ${S.user.username}`} to continue; anything you were typing is kept.`),
-      err, h('label', {}, byPin ? 'PIN' : 'Password'), pw,
+      err, label, pw,
     ], [
       ['Sign out', () => { m.close(); reauthing = null; S.user = null; reject(new Error('signed out')); renderLogin(); }],
       ['Sign in', submit, 'primary'],
@@ -245,9 +267,10 @@ function dropMenu(label, items, cls = '') {
 }
 
 // Excel export with the three ways to save. params() gives the filters at click time.
-function exportMenu(kind, params = () => ({})) {
+function exportMenu(kind, params = () => ({}), label = 'Export to Excel') {
+  if (!can('export')) return null;
   // On a phone (S.remote) the Save As dialog would open on the office PC, so it is left out.
-  return dropMenu('Export to Excel', () => [
+  return dropMenu(label, () => [
     S.remote ? null : ['Save as\u2026', 'pick where to save it', () => doExport(kind, params(), 'saveas')],
     ['Save to folder', S.exportFolder || 'an admin sets the folder in Settings', () => doExport(kind, params(), 'folder')],
     ['Download', S.remote ? 'to this device' : 'to this PC\u2019s Downloads folder', () => doExport(kind, params(), 'download')],
@@ -358,6 +381,9 @@ function showErr(box, msg) { box.textContent = msg; box.classList.remove('hidden
 
 const S = { user: null, needsSetup: false, schoolName: '', emailReady: false, mailRelay: false, idleMinutes: 15, exportFolder: '', version: '', remote: false, aiReady: false, dictateKey: 'F2', board: null, device: null, pinSignIn: true };
 const $app = document.getElementById('app');
+
+// What the signed-in role may do (the server checks too): edit, dose, visit, export, dictate.
+const can = (perm) => !!S.user && (S.user.role === 'admin' || (S.user.perms || []).includes(perm));
 
 // [key, name, kind, swatch colors: background, panel, accent, style]
 const THEMES = [
@@ -472,6 +498,7 @@ async function loadState() {
   Object.assign(S, {
     user: st.user, needsSetup: st.needsSetup, schoolName: st.schoolName, emailReady: st.emailReady, mailRelay: !!st.mailRelay,
     idleMinutes: st.idleMinutes, exportFolder: st.exportFolder || '', version: st.version, remote: !!st.remote, aiReady: !!st.aiReady, dictateKey: st.dictateKey || 'F2', device: st.device || null, pinSignIn: st.pinSignIn !== false,
+    locked: !!st.locked, encrypted: !!st.encrypted, require2fa: !!st.require2fa,
   });
 }
 
@@ -483,9 +510,11 @@ const go = (hash) => { if (location.hash === hash) render(); else location.hash 
 window.addEventListener('hashchange', () => render());
 
 function render() {
+  if (S.locked) return renderLocked();
   if (S.needsSetup) return renderSetup();
   if (!S.user) return renderLogin();
   if (S.user.mustChange) return renderMustChange();
+  if (S.require2fa && !S.user.totpOn) return renderNeed2fa();
   renderShell();
 }
 
@@ -540,7 +569,8 @@ function renderSetup() {
       S.needsSetup = false;
       S.schoolName = f.schoolName.value.trim();
       S.user = r.user;
-      showRecovery(r.recovery, () => go('#/settings/email'), true);
+      S.encrypted = !!r.recordsKey;
+      showRecovery(r.recovery, () => (r.recordsKey ? showRecordsKey(r.recordsKey, () => go('#/settings/email')) : go('#/settings/email')), true);
     } catch (ex) { showErr(err, ex.message); }
   };
   gate('First-time setup', 'Create the administrator account. Password reset codes are sent to this email address.',
@@ -552,6 +582,94 @@ function renderSetup() {
       field('Password (10+ characters, letters and numbers)', f.password),
       field('Confirm password', f.confirm),
       h('button', { class: 'btn primary', type: 'submit' }, 'Create account')));
+}
+
+// The records recovery key: shown once when encryption is turned on.
+function showRecordsKey(key, then) {
+  const ok = h('input', { type: 'checkbox' });
+  const m = modal('Save the records recovery key', [
+    h('p', {}, 'Student records on this PC are now encrypted. This key opens them, and every backup, on another computer or after Windows is reinstalled. Without it, a backup cannot be opened by anyone, including us.'),
+    h('div', { class: 'code' }, key),
+    h('p', { class: 'muted small' }, 'Print it or write it down and keep it with the school’s important papers, away from this computer. It is shown only once; an admin can make a new one in Settings > School & security.'),
+    h('label', { class: 'check' }, ok, 'I saved the records recovery key'),
+  ], [['Continue', () => { if (!ok.checked) { toast('Tick the box once the key is saved', true); return; } m.close(); then(); }, 'primary']], { noDismiss: true });
+}
+
+// The records are encrypted and this Windows account has no key for them.
+function renderLocked(note) {
+  const err = errBox();
+  const key = h('input', { type: 'text', autocomplete: 'off', placeholder: 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX', style: 'font-family:monospace' });
+  gate('Unlock student records', 'The records on this PC are encrypted, and this Windows account does not have their key yet. This happens on a new PC, after Windows is reinstalled, or when a backup was copied in.',
+    note ? h('div', { class: 'alert warn' }, note) : null,
+    S.remote ? h('div', { class: 'alert warn' }, 'Unlock the records at the office PC.') : h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          await api('POST', '/api/unlock', { key: key.value }, { noReauth: true });
+          await loadState();
+          toast('Records unlocked');
+          render();
+        } catch (ex) { showErr(err, ex.message); }
+      },
+    }, err,
+    field('Records recovery key (from when encryption was turned on)', key),
+    h('button', { class: 'btn primary', type: 'submit' }, 'Unlock'),
+    h('p', { class: 'muted small' }, 'Lost the key? The records cannot be opened without it. Uninstall and reinstall to start over with empty records.')));
+}
+
+// Second step of signing in: the 6 digit code from the authenticator app.
+function renderCode(ticket, username) {
+  const err = errBox();
+  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 24, class: 'pin' });
+  gate('Enter your sign-in code', 'Open your authenticator app and type the 6 digit code for Nurse’s Log. Lost your phone? Type your account recovery code instead.',
+    h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const r = await api('POST', '/api/login/code', { ticket, code: code.value }, { noReauth: true });
+          S.user = r.user;
+          lastActive = Date.now();
+          await loadState();
+          render();
+          if (r.how === 'recovery') toast('Signed in with your recovery code. Make a new one in Settings > My account, and ask an admin to reset two-step sign-in if your phone is gone.');
+          offerPin();
+        } catch (ex) {
+          code.value = '';
+          if (/password again/.test(ex.message)) return renderLogin(ex.message, true);
+          showErr(err, ex.message);
+        }
+      },
+    }, err,
+    field('Code', code),
+    h('button', { class: 'btn primary', type: 'submit' }, 'Sign in'),
+    h('button', { class: 'linkbtn', type: 'button', onclick: () => renderLogin(null, true) }, `Not ${username}? Back to sign in`)));
+}
+
+// Set up two-step sign-in: scan the QR code into an authenticator app, then type a code.
+async function totpSetup(container, done) {
+  const err = errBox();
+  let st;
+  try { st = await post('/api/account/totp/start'); } catch (e) { container.append(h('div', { class: 'alert bad' }, e.message)); return; }
+  const code = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 6, class: 'pin' });
+  container.append(
+    h('ol', {},
+      h('li', {}, 'On your phone, open an authenticator app (Microsoft Authenticator, Google Authenticator, or your phone’s password manager).'),
+      h('li', {}, 'Add an account and scan this code. Or type the key below it.'),
+      h('li', {}, 'Type the 6 digit code the app shows.')),
+    h('div', { class: 'qr' }, qrSvg(st.rows, 180)),
+    h('p', { class: 'muted small' }, 'Key: ', h('code', {}, st.secret.replace(/(.{4})/g, '$1 ').trim())),
+    err, field('Code from the app', code),
+    h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+      try { S.user = await post('/api/account/totp/confirm', { code: code.value }); toast('Two-step sign-in is on'); done(); } catch (e) { showErr(err, e.message); }
+    } }, 'Turn on')));
+}
+
+// An admin requires two-step sign-in and this account has not set it up yet.
+function renderNeed2fa() {
+  const box = h('div', {});
+  gate('Set up two-step sign-in', 'Your school requires a code from your phone when you sign in, as well as your password. It takes a minute.',
+    box, h('button', { class: 'linkbtn', type: 'button', onclick: signOut }, 'Sign out'));
+  totpSetup(box, () => render());
 }
 
 function showRecovery(code, then, own = false) {
@@ -612,6 +730,7 @@ function renderLogin(note, usePassword = false) {
         e.preventDefault();
         try {
           const r = await api('POST', '/api/login', { username: user.value, password: pw.value }, { noReauth: true });
+          if (r.needCode) return renderCode(r.ticket, user.value);
           S.user = r.user;
           lastActive = Date.now();
           await loadState();
@@ -788,7 +907,7 @@ async function viewToday(main) {
   const reload = () => viewToday(main);
   fill(main, 
     h('div', { class: 'head' }, h('h1', {}, 'Today'), h('span', { class: 'muted', title: 'Nurse’s log, stardate…' }, `${new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })} · stardate ${stardate()}`),
-      h('div', { class: 'grow' }), h('button', { class: 'btn primary', onclick: () => pickStudent((s) => visitForm(s, null, reload)) }, 'New visit')),
+      h('div', { class: 'grow' }), can('visit') ? h('button', { class: 'btn primary', onclick: () => pickStudent((s) => visitForm(s, null, reload)) }, 'New visit') : null),
     h('div', { class: 'cards' },
       h('div', { class: 'card' }, h('b', {}, t.visits.length), h('span', {}, 'visits today')),
       h('div', { class: 'card' }, h('b', {}, left), h('span', {}, 'scheduled doses left')),
@@ -802,24 +921,26 @@ async function viewToday(main) {
         { label: 'Student', get: (r) => [fullName(r), r.allergies ? h('div', {}, h('span', { class: 'pill bad' }, 'Allergy: ' + r.allergies)) : null] },
         { label: 'Medication', get: (r) => [r.name, r.dose && ` \u00B7 ${r.dose}`, r.route && ` \u00B7 ${r.route}`] },
         { label: 'Status', get: (r) => (r.record ? statusPill(r.record.status, fmtTime(r.record.given_at))
-          : h('button', { class: 'btn small primary', onclick: () => giveForm(r, r.time, reload) }, 'Record dose')) },
+          : can('dose') ? h('button', { class: 'btn small primary', onclick: () => giveForm(r, r.time, reload) }, 'Record dose') : h('span', { class: 'muted' }, 'due')) },
       ], due, { empty: t.meds.closed ? 'No school today.' : 'No scheduled medications today.', onRow: (r) => go(`#/student/${r.student_id}/meds`) })),
     t.meds.prn.length ? h('div', { class: 'panel' }, h('h2', {}, 'As-needed (PRN) medications on file'),
       table([
         { label: 'Student', get: fullName },
         { label: 'Medication', get: (r) => [r.name, r.dose && ` \u00B7 ${r.dose}`] },
         { label: 'Instructions', get: (r) => r.instructions || '' },
-        { label: '', get: (r) => h('button', { class: 'btn small', onclick: () => giveForm(r, null, reload) }, 'Give') },
+        { label: '', get: (r) => (can('dose') ? h('button', { class: 'btn small', onclick: () => giveForm(r, null, reload) }, 'Give') : '') },
       ], t.meds.prn, { onRow: (r) => go(`#/student/${r.student_id}/meds`) })) : null,
     h('div', { class: 'panel' }, h('h2', {}, 'Visits today'),
       table(visitCols(true), t.visits, { empty: 'No visits yet today.', onRow: (r) => go(`#/student/${r.student_id}/visits`) })),
     phoneActions(
-      ['+ New visit', () => pickStudent((s) => visitForm(s, null, reload))],
-      ['\u{1F48A} Give dose', () => pickStudent((s) => giveDose(s, null, reload))]));
+      can('visit') && ['+ New visit', () => pickStudent((s) => visitForm(s, null, reload))],
+      can('dose') && ['\u{1F48A} Give dose', () => pickStudent((s) => giveDose(s, null, reload))]));
 }
 
 // Big buttons pinned above the tab bar on phones; hidden on the PC.
 function phoneActions(...buttons) {
+  buttons = buttons.filter(Boolean);
+  if (!buttons.length) return null;
   return h('div', { class: 'phone-actions' }, buttons.map(([label, fn], i) => h('button', { class: 'btn' + (i === 0 ? ' primary' : ''), type: 'button', onclick: fn }, label)));
 }
 
@@ -896,7 +1017,7 @@ async function viewCalendar(main, r) {
         { label: 'Student', get: (x) => [fullName(x), x.med_alerts === 'off' ? h('span', { class: 'pill', style: 'margin-left:6px', title: 'Reminders are off for this student' }, 'no reminders') : null] },
         { label: 'Medication', get: (x) => [x.name, x.dose && ` \u00B7 ${x.dose}`] },
         { label: 'Status', get: (x) => (x.record ? statusPill(x.record.status, fmtTime(x.record.given_at))
-          : canRecord ? h('button', { class: 'btn small primary', onclick: () => giveForm(x, x.time, reloadDay, d.date) }, 'Record dose') : h('span', { class: 'muted' }, 'scheduled')) },
+          : canRecord && can('dose') ? h('button', { class: 'btn small primary', onclick: () => giveForm(x, x.time, reloadDay, d.date) }, 'Record dose') : h('span', { class: 'muted' }, 'scheduled')) },
       ], due.scheduled, { empty: 'No scheduled medications this day.', onRow: (x) => go(`#/student/${x.student_id}/meds`) })));
   }
   fill(main,
@@ -984,7 +1105,7 @@ function showAlerts() {
     h('div', {}, [i.name, i.dose, i.route].filter(Boolean).join(' \u00B7 ')),
     i.allergies ? h('div', { class: 'pill bad', style: 'margin-top:4px' }, 'Allergy: ' + i.allergies) : null,
     h('div', { class: 'row' },
-      h('button', { class: 'btn small primary', type: 'button', onclick: () => giveForm({ ...i, id: i.medication_id }, i.time, refresh) }, 'Record dose'),
+      can('dose') ? h('button', { class: 'btn small primary', type: 'button', onclick: () => giveForm({ ...i, id: i.medication_id }, i.time, refresh) }, 'Record dose') : null,
       h('button', { class: 'btn small', type: 'button', onclick: () => hideAlert(i.key, Date.now() + 10 * 60000) }, 'Snooze 10 min'),
       h('button', { class: 'btn small', type: 'button', onclick: () => hideAlert(`${i.key}|${i.stage}`, Date.now()) }, 'Dismiss')))),
   items.length > shown.length ? h('button', { class: 'med-alert more', type: 'button', onclick: () => go('#/today') }, `+${items.length - shown.length} more due \u2014 see Today`) : null);
@@ -1018,7 +1139,9 @@ async function viewStudents(main) {
   fill(main, 
     h('div', { class: 'head' }, h('h1', {}, 'Students'), h('div', { class: 'grow' }),
       exportMenu('students', params),
-      h('button', { class: 'btn primary', onclick: () => studentForm(null) }, 'Add student')),
+      exportMenu('immunizations', () => ({ grade: grade.value }), 'Immunization report'),
+      can('edit') ? h('button', { class: 'btn', onclick: () => importDialog(load) }, 'Import roster') : null,
+      can('edit') ? h('button', { class: 'btn primary', onclick: () => studentForm(null) }, 'Add student') : null),
     h('div', { class: 'panel' },
       h('div', { class: 'row', style: 'margin-bottom:12px' }, q, grade, h('label', { class: 'check' }, arch, 'Show archived')),
       list));
@@ -1089,7 +1212,7 @@ function pickStudent(then) {
 const DISPOSITIONS = ['', 'Returned to class', 'Rested, returned to class', 'Sent home', 'Parent picked up', 'Called 911 / EMS', 'Referred to doctor', 'Other'];
 const ROUTES = ['', 'By mouth', 'Inhaled', 'Topical', 'Injection', 'Nasal', 'Eye drops', 'Ear drops', 'Other'];
 const STATUSES = ['given', 'refused', 'absent', 'held', 'missed'];
-const STUDENT_TABS = ['info', 'meds', 'medlog', 'visits', 'history'];
+const STUDENT_TABS = ['info', 'meds', 'medlog', 'visits', 'imm', 'history'];
 
 async function viewStudent(main, r) {
   const b = await get(`/api/students/${r.id}`);
@@ -1101,32 +1224,33 @@ async function viewStudent(main, r) {
   const body = h('div', {});
   fill(main, 
     h('div', { class: 'head' },
-      h('button', { class: 'photo-btn', type: 'button', title: s.photo_at ? 'Change or remove photo' : 'Add a photo', 'aria-label': `Photo of ${s.first_name} ${s.last_name}`, onclick: () => photoDialog({
+      !can('edit') ? avatar('student', s.id, s.photo_at, `${s.first_name} ${s.last_name}`, 64) : h('button', { class: 'photo-btn', type: 'button', title: s.photo_at ? 'Change or remove photo' : 'Add a photo', 'aria-label': `Photo of ${s.first_name} ${s.last_name}`, onclick: () => photoDialog({
         title: `Photo of ${s.first_name} ${s.last_name}`, kind: 'student', id: s.id, at: s.photo_at, name: `${s.first_name} ${s.last_name}`,
         save: (data) => post(`/api/students/${s.id}/photo`, { data }), remove: () => post(`/api/students/${s.id}/photo/remove`), done: reload,
       }) }, avatar('student', s.id, s.photo_at, `${s.first_name} ${s.last_name}`, 64)),
       h('div', {}, h('div', { class: 'namerow' }, h('h1', {}, `${s.first_name} ${s.last_name}`),
-        h('button', { class: 'btn small', type: 'button', title: 'Edit student info', 'aria-label': `Edit ${s.first_name} ${s.last_name}`, onclick: () => studentForm(s, reload) }, '✎ Edit')),
+        can('edit') ? h('button', { class: 'btn small', type: 'button', title: 'Edit student info', 'aria-label': `Edit ${s.first_name} ${s.last_name}`, onclick: () => studentForm(s, reload) }, '✎ Edit') : null),
         h('div', { class: 'muted' }, [s.student_no && `ID ${s.student_no}`, s.grade && `Grade ${s.grade}`, s.homeroom, s.dob && `DOB ${s.dob} (${age(s.dob)})`].filter(Boolean).join(' \u00B7 '))),
       s.archived ? h('span', { class: 'pill warn' }, 'Archived') : null,
       h('div', { class: 'grow' }),
-      h('button', { class: 'btn primary', onclick: () => visitForm(s, null, () => go(`#/student/${s.id}/visits`)) }, 'New visit'),
+      can('visit') ? h('button', { class: 'btn primary', onclick: () => visitForm(s, null, () => go(`#/student/${s.id}/visits`)) }, 'New visit') : null,
       exportMenu('student', () => ({ studentId: s.id })),
-      dropMenu('More', () => [
+      !can('edit') ? null : dropMenu('More', () => [
         ['Edit student info', null, () => studentForm(s, reload)],
         [s.archived ? 'Restore student' : 'Archive student', s.archived ? 'show in the student list again' : 'hide from lists, keep all records', async () => {
           if (!s.archived && !(await confirmBox('Archive student?', `${s.first_name} ${s.last_name} will be hidden from lists and their medications from Today. All records are kept and can be restored.`, 'Archive'))) return;
           await post(`/api/students/${s.id}/archive`, { archived: !s.archived }).then(reload, (e) => toast(e.message, true));
         }],
-      ])),
+        s.archived && S.user.role === 'admin' ? ['Delete for good\u2026', 'erase this student and all their records', () => deleteStudent(s)] : null,
+      ].filter(Boolean))),
     s.allergies ? h('div', { class: 'alert bad' }, h('b', {}, 'Allergies: '), s.allergies) : null,
     s.conditions ? h('div', { class: 'alert warn' }, h('b', {}, 'Conditions: '), s.conditions) : null,
     phoneActions(
-      ['+ New visit', () => visitForm(s, null, () => go(`#/student/${s.id}/visits`))],
-      ['\u{1F48A} Give dose', () => giveDose(s, b.medications, reload)]),
+      can('visit') && ['+ New visit', () => visitForm(s, null, () => go(`#/student/${s.id}/visits`))],
+      can('dose') && ['\u{1F48A} Give dose', () => giveDose(s, b.medications, reload)]),
     h('div', { class: 'panel' },
       h('div', { class: 'tabs', role: 'tablist' }, tabBtn('info', 'Info'), tabBtn('meds', `Medications (${b.medications.filter((m) => m.active).length})`),
-        tabBtn('medlog', 'Medication log'), tabBtn('visits', `Visits (${b.visits.length})`), tabBtn('history', 'History')),
+        tabBtn('medlog', 'Medication log'), tabBtn('visits', `Visits (${b.visits.length})`), tabBtn('imm', `Immunizations (${b.immunizations.length})`), tabBtn('history', 'History')),
       body));
 
   if (tab === 'info') {
@@ -1137,7 +1261,7 @@ async function viewStudent(main, r) {
     h('h3', { class: 'formhead' }, STUDENT_FORM[cut][1]),
     s.med_consent && s.med_consent !== 'On file' ? h('div', { class: 'alert warn' }, `Medication permission: ${s.med_consent}`) : null,
     h('dl', { class: 'kv' }, kv(STUDENT_FORM.slice(cut + 1))),
-    h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn', onclick: () => studentForm(s, reload) }, 'Edit info')));
+    can('edit') ? h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn', onclick: () => studentForm(s, reload) }, 'Edit info')) : null);
   } else if (tab === 'meds') {
     const remind = h('input', { type: 'checkbox', checked: s.med_alerts !== 'off' });
     remind.addEventListener('change', async () => {
@@ -1148,9 +1272,9 @@ async function viewStudent(main, r) {
       } catch (e) { remind.checked = !remind.checked; toast(e.message, true); }
     });
     body.append(
-      h('div', { class: 'row', style: 'margin-bottom:10px' }, h('button', { class: 'btn primary', onclick: () => medForm(s, null, reload) }, 'Add medication'),
+      can('edit') ? h('div', { class: 'row', style: 'margin-bottom:10px' }, h('button', { class: 'btn primary', onclick: () => medForm(s, null, reload) }, 'Add medication'),
         h('div', { class: 'grow' }),
-        h('label', { class: 'check', title: 'Pop-up and phone reminders when a scheduled dose is due' }, remind, `Medication reminders for ${s.first_name}`)),
+        h('label', { class: 'check', title: 'Pop-up and phone reminders when a scheduled dose is due' }, remind, `Medication reminders for ${s.first_name}`)) : null,
       table([
         { label: 'Medication', get: (m) => [h('b', {}, m.name), m.active ? null : h('span', { class: 'pill', style: 'margin-left:6px' }, 'stopped')] },
         { label: 'Dose', get: (m) => [m.dose, m.route && ` \u00B7 ${m.route}`] },
@@ -1158,15 +1282,17 @@ async function viewStudent(main, r) {
         { label: 'Dates', nowrap: true, get: (m) => [m.start_date || '', m.end_date ? ` to ${m.end_date}` : ''] },
         { label: 'On hand', get: (m) => (m.on_hand == null ? '' : h('span', { class: 'pill' + (m.on_hand <= 5 ? ' warn' : '') }, m.on_hand)) },
         { label: '', nowrap: true, get: (m) => h('div', { class: 'row' },
-          m.active ? h('button', { class: 'btn small primary', onclick: () => giveForm({ ...m, first_name: s.first_name, last_name: s.last_name, allergies: s.allergies }, null, reload) }, 'Give') : null,
-          h('button', { class: 'btn small', onclick: () => medForm(s, m, reload) }, 'Edit')) },
+          m.active && can('dose') ? h('button', { class: 'btn small primary', onclick: () => giveForm({ ...m, first_name: s.first_name, last_name: s.last_name, allergies: s.allergies }, null, reload) }, 'Give') : null,
+          can('edit') ? h('button', { class: 'btn small', onclick: () => medForm(s, m, reload) }, 'Edit') : null) },
       ], b.medications, { empty: 'No medications on file.' }));
   } else if (tab === 'medlog') {
     body.append(table(givenCols(false, reload), b.given, { empty: 'No doses recorded yet.' }));
   } else if (tab === 'visits') {
     body.append(
-      h('div', { class: 'row', style: 'margin-bottom:10px' }, h('button', { class: 'btn primary', onclick: () => visitForm(s, null, reload) }, 'New visit')),
-      table(visitCols(false, reload), b.visits, { empty: 'No visits yet.', onRow: (v) => visitForm(s, v, reload) }));
+      can('visit') ? h('div', { class: 'row', style: 'margin-bottom:10px' }, h('button', { class: 'btn primary', onclick: () => visitForm(s, null, reload) }, 'New visit')) : null,
+      table(visitCols(false, reload), b.visits, { empty: 'No visits yet.', onRow: can('visit') ? (v) => visitForm(s, v, reload) : null }));
+  } else if (tab === 'imm') {
+    immunizationTab(body, s, b.immunizations, reload);
   } else {
     body.append(h('p', { class: 'muted small' }, 'Every view, change and export of this student\u2019s record, newest first.'), auditTable(b.history, false));
   }
@@ -1320,6 +1446,155 @@ function visitForm(s, v, reload) {
       } catch (e) { showErr(err, e.message); }
     }, 'primary'],
   ], { wide: true });
+}
+
+// ---- immunizations ------------------------------------------------------------------
+
+const IMM_STATUS = ['', 'Complete', 'In progress', 'Incomplete', 'Medical exemption', 'Religious or personal exemption', 'Not reviewed'];
+const VACCINES = ['DTaP / Tdap', 'Polio (IPV)', 'MMR', 'Hepatitis B', 'Varicella (chickenpox)', 'Meningococcal (MenACWY)', 'Hepatitis A', 'Hib', 'Pneumococcal', 'HPV', 'Influenza', 'COVID-19'];
+
+function immunizationTab(body, s, list, reload) {
+  const st = s.imm_status || 'Not reviewed';
+  const tone = st === 'Complete' ? ' ok' : ['In progress', 'Incomplete'].includes(st) ? ' warn' : '';
+  body.append(
+    h('div', { class: 'row', style: 'margin-bottom:10px' },
+      h('span', {}, 'Status: '), h('span', { class: 'pill' + tone }, st),
+      s.imm_notes ? h('span', { class: 'muted small' }, s.imm_notes) : null,
+      h('div', { class: 'grow' }),
+      can('edit') ? h('button', { class: 'btn', onclick: () => immStatusForm(s, reload) }, 'Change status') : null,
+      can('edit') ? h('button', { class: 'btn primary', onclick: () => immForm(s, null, reload) }, 'Add dose') : null),
+    table([
+      { label: 'Vaccine', get: (i) => h('b', {}, i.vaccine) },
+      { label: 'Dose', get: (i) => i.dose_no || '' },
+      { label: 'Date given', nowrap: true, get: (i) => i.given_on || '' },
+      { label: 'Source', get: (i) => i.source || '' },
+      { label: 'Notes', get: (i) => h('span', { class: 'pre' }, i.notes || '') },
+      { label: 'Entered by', get: (i) => i.entered_by || '' },
+    ], list, { empty: 'No immunizations recorded yet.', onRow: can('edit') ? (i) => immForm(s, i, reload) : null }),
+    h('p', { class: 'muted small' }, 'Requirements differ by state and grade; the Immunization report on the Students page lists every student’s doses for your state report.'));
+}
+
+function immStatusForm(s, reload) {
+  const fields = [['imm_status', 'Immunization status', 'select', { choices: IMM_STATUS }], ['imm_notes', 'Notes (what is missing, exemption details, due dates)', 'textarea', { rows: 3 }]];
+  const form = formGrid(fields, s);
+  const err = errBox();
+  const dlg = modal(`Immunization status: ${s.first_name} ${s.last_name}`, [assistBar(form, fields, { form: 'Immunization status', studentId: s.id }), err, form], [
+    ['Cancel', () => dlg.close()],
+    ['Save', async () => {
+      try { await post(`/api/students/${s.id}`, readForm(form)); dlg.close(); toast('Saved'); reload(); } catch (e) { showErr(err, e.message); }
+    }, 'primary'],
+  ], { wide: true });
+}
+
+function immForm(s, i, reload) {
+  const fields = [
+    ['vaccine', 'Vaccine', 'text', { required: true, list: 'vaccines' }],
+    ['dose_no', 'Dose number (1, 2, booster…)'],
+    ['given_on', 'Date given', 'date'],
+    ['source', 'Source (shot record, state registry, doctor…)'],
+    ['notes', 'Notes', 'textarea', { rows: 2 }],
+  ];
+  const form = formGrid(fields, i || {});
+  form.append(h('datalist', { id: 'vaccines' }, VACCINES.map((v) => h('option', { value: v }))));
+  const err = errBox();
+  const dlg = modal(i ? `${i.vaccine} for ${s.first_name} ${s.last_name}` : `Add immunization for ${s.first_name} ${s.last_name}`, [assistBar(form, fields, { form: 'Immunization', studentId: s.id }), err, form], [
+    ...(i ? [['Delete', async () => {
+      if (!(await confirmBox('Delete this dose?', `Delete ${i.vaccine}${i.given_on ? ` from ${i.given_on}` : ''}? The audit log keeps a copy.`, 'Delete', true))) return;
+      try { await post(`/api/immunizations/${i.id}/delete`); dlg.close(); toast('Deleted'); reload(); } catch (e) { showErr(err, e.message); }
+    }, 'danger']] : []),
+    ['Cancel', () => dlg.close()],
+    ['Save', async () => {
+      try {
+        if (i) await post(`/api/immunizations/${i.id}`, readForm(form));
+        else await post(`/api/students/${s.id}/immunizations`, readForm(form));
+        dlg.close();
+        toast('Immunization saved');
+        reload();
+      } catch (e) { showErr(err, e.message); }
+    }, 'primary'],
+  ], { wide: true });
+}
+
+// ---- roster import and deleting for good ------------------------------------------------
+
+function readFileB64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = () => reject(new Error('that file could not be read'));
+    r.readAsDataURL(file);
+  });
+}
+
+// Students > Import roster: pick a CSV or Excel export, see what would change, then import.
+function importDialog(done) {
+  const err = errBox();
+  const file = h('input', { type: 'file', accept: '.csv,.xlsx,.txt' });
+  const full = h('input', { type: 'checkbox' });
+  const result = h('div', {});
+  let ready = null;
+  const summary = (r) => [
+    h('div', { class: 'cards' },
+      h('div', { class: 'card' }, h('b', {}, r.create), h('span', {}, 'new students')),
+      h('div', { class: 'card' }, h('b', {}, r.update), h('span', {}, 'updated')),
+      h('div', { class: 'card' }, h('b', {}, r.same), h('span', {}, 'no change')),
+      full.checked ? h('div', { class: 'card' }, h('b', {}, r.archive), h('span', {}, 'archived (not in file)')) : null),
+    h('p', { class: 'muted small' }, `Columns used: ${r.columns.join(', ')}.`, r.unused.length ? ` Not used: ${r.unused.join(', ')}.` : ''),
+    r.restore ? h('p', {}, `${r.restore} archived student${r.restore === 1 ? '' : 's'} in the file will be restored.`) : null,
+    r.archive ? h('details', {}, h('summary', {}, `Students to archive (${r.archive})`), h('p', { class: 'small' }, r.archiveNames.join('; '), r.archive > r.archiveNames.length ? ' …' : '')) : null,
+    r.errors.length ? h('div', { class: 'alert bad' }, h('b', {}, `${r.errors.length} row${r.errors.length === 1 ? '' : 's'} skipped: `), r.errors.slice(0, 10).map((e) => `line ${e.line}: ${e.msg}`).join('; ')) : null,
+    r.notes.length ? h('div', { class: 'alert warn' }, r.notes.slice(0, 10).map((e) => `line ${e.line}: ${e.msg}`).join('; '), r.notes.length > 10 ? ' …' : '') : null,
+    r.sample.length ? table([
+      { label: 'Line', get: (x) => x.line },
+      { label: 'Student', get: (x) => h('b', {}, x.name) },
+      { label: 'Change', get: (x) => (x.action === 'create' ? 'new' : [x.restore ? 'restore, ' : '', x.changes.join(', ')]) },
+    ], r.sample) : null,
+  ];
+  let importBtn;
+  const run = async (apply) => {
+    err.classList.add('hidden');
+    const f = file.files && file.files[0];
+    if (!f) return showErr(err, 'pick a file first');
+    try {
+      const r = await post('/api/import/students', { name: f.name, data: await readFileB64(f), fullRoster: full.checked, apply });
+      if (apply) {
+        dlg.close();
+        toast(`Imported: ${r.create} added, ${r.update} updated${r.archive ? `, ${r.archive} archived` : ''}`);
+        done();
+        return;
+      }
+      ready = r;
+      result.replaceChildren(...summary(r).filter(Boolean));
+      importBtn.disabled = !(r.create || r.update || r.archive);
+    } catch (e) { showErr(err, e.message); }
+  };
+  file.addEventListener('change', () => { ready = null; result.replaceChildren(); importBtn.disabled = true; run(false); });
+  full.addEventListener('change', () => { if (file.files && file.files[0]) run(false); });
+  const dlg = modal('Import a student roster', [
+    h('p', { class: 'muted' }, 'Export the student list from your student information system (PowerSchool, Infinite Campus, Skyward…) or a spreadsheet as CSV or Excel. A header row names the columns: First name and Last name are needed; Student ID, birth date, grade, homeroom, sex, guardian and phone, allergies and conditions are used when present.'),
+    h('p', { class: 'muted small' }, 'Students are matched by student ID, or by name and birth date. Only filled-in cells change a record; a blank cell never clears anything. Nothing is saved until you press Import.'),
+    err, field('File', file),
+    h('label', { class: 'check' }, full, 'This is the whole school: archive students with an ID who are not in the file (new school year)'),
+    result,
+  ], [['Cancel', () => dlg.close()], ['Import', () => ready && run(true), 'primary']], { wide: true });
+  importBtn = [...dlg.box.querySelectorAll('.actions .btn')].pop();
+  importBtn.disabled = true;
+}
+
+// An archived student, gone for good: the admin types the last name to confirm.
+function deleteStudent(s) {
+  const err = errBox();
+  const confirmName = h('input', { type: 'text', autocomplete: 'off' });
+  const dlg = modal(`Delete ${s.first_name} ${s.last_name} for good?`, [
+    h('div', { class: 'alert bad' }, 'This erases the student and every medication, dose, visit, immunization and photo for them. It cannot be undone. The audit log keeps who did what and when, without the health details.'),
+    h('p', { class: 'muted small' }, 'Copies stay in the daily backups until they age out (30 days). Export the student first if your district needs a copy.'),
+    err, field(`Type ${s.last_name} to confirm`, confirmName),
+  ], [
+    ['Cancel', () => dlg.close()],
+    ['Delete for good', async () => {
+      try { await post(`/api/students/${s.id}/delete`, { confirm: confirmName.value }); dlg.close(); toast('Student deleted'); go('#/students'); } catch (e) { showErr(err, e.message); }
+    }, 'danger'],
+  ]);
 }
 
 // ---- logs -------------------------------------------------------------------------
@@ -1616,6 +1891,7 @@ function setAccount(body) {
         err2.classList.add('hidden');
       } catch (e) { showErr(err2, e.message); }
     } }, 'Change password'))),
+    twoStepSection(),
     devicesSection(),
     shortcutSection(),
     h('div', { class: 'phone-only', style: 'margin-bottom:22px' }, h('button', { class: 'btn', type: 'button', onclick: signOut }, 'Sign out')),
@@ -1623,6 +1899,27 @@ function setAccount(body) {
       err3, h('div', { class: 'row' }, rpw, h('button', { class: 'btn', onclick: async () => {
         try { const r = await post('/api/account/recovery', { password: rpw.value }); rpw.value = ''; showRecovery(r.recovery, () => {}, true); } catch (e) { showErr(err3, e.message); }
       } }, 'Make new code'))));
+}
+
+// Settings > My account: a code from an authenticator app as well as the password.
+function twoStepSection() {
+  const box = h('div', {});
+  const err = errBox();
+  const pw = h('input', { type: 'password', autocomplete: 'current-password', style: 'max-width:260px', placeholder: 'your password' });
+  const draw = () => {
+    box.replaceChildren();
+    if (S.user.totpOn) {
+      box.append(h('div', { class: 'alert ok' }, 'Two-step sign-in is on. Signing in asks for a code from your authenticator app after the password.'),
+        S.require2fa ? h('p', { class: 'muted small' }, 'Your school requires it, so it cannot be turned off.') : [err, h('div', { class: 'row' }, pw, h('button', { class: 'btn', onclick: async () => {
+          try { S.user = await post('/api/account/totp/off', { password: pw.value }); toast('Two-step sign-in is off'); draw(); } catch (e) { showErr(err, e.message); }
+        } }, 'Turn off'))]);
+    } else {
+      box.append(h('p', { class: 'muted' }, 'Ask for a 6 digit code from your phone when you sign in, so a stolen password alone cannot open student records. Phones you keep signed in with a PIN do not ask again.'),
+        h('button', { class: 'btn primary', onclick: (e) => { e.currentTarget.remove(); totpSetup(box, draw); } }, 'Set up two-step sign-in'));
+    }
+  };
+  draw();
+  return section('Two-step sign-in', box);
 }
 
 // Settings > My account: phones that open with a PIN instead of the password.
@@ -1855,18 +2152,28 @@ async function setUsers(body, _d, reload) {
       { label: 'Username', get: (u) => u.username },
       { label: 'Email', get: (u) => u.email },
       { label: 'Role', get: (u) => h('span', { class: 'pill' + (u.role === 'admin' ? ' ok' : '') }, u.role) },
+      { label: 'Two-step', get: (u) => (u.totpOn ? h('span', { class: 'pill ok' }, 'on') : 'off') },
       { label: 'Status', get: (u) => (u.active ? (u.mustChange ? h('span', { class: 'pill warn' }, 'temp password') : 'active') : h('span', { class: 'pill bad' }, 'disabled')) },
       { label: 'Last sign-in', nowrap: true, get: (u) => fmtDT(u.lastLogin) || 'never' },
     ], users, { onRow: (u) => userForm(u, reload) }),
-    h('p', { class: 'muted small' }, 'Admins manage users, settings, backups and the audit log; nurses do everything else. Accounts are disabled, never deleted, so the logs keep their names.'));
+    h('dl', { class: 'kv small' }, ROLE_HELP.flatMap(([r, t]) => [h('dt', {}, r), h('dd', {}, t)])),
+    h('p', { class: 'muted small' }, 'Accounts are disabled, never deleted, so the logs keep their names.'));
 }
+
+const ROLE_HELP = [
+  ['admin', 'Everything, plus users, settings, backups, deleting and the audit log.'],
+  ['nurse', 'All record keeping: students, medications, doses, visits, immunizations, imports and exports.'],
+  ['aide', 'A health aide: records doses and office visits and can dictate; cannot change student info or medications, or export.'],
+  ['viewer', 'Read only, for a principal or counselor: sees records, changes nothing, cannot export.'],
+];
+const ROLE_CHOICES = ['nurse', 'aide', 'viewer', 'admin'];
 
 function userForm(u, reload) {
   const err = errBox();
   const fields = u
-    ? [['fullName', 'Full name'], ['email', 'Email', 'email'], ['role', 'Role', 'select', { choices: ['nurse', 'admin'] }], ['active', 'Account active', 'check']]
+    ? [['fullName', 'Full name'], ['email', 'Email', 'email'], ['role', 'Role', 'select', { choices: ROLE_CHOICES }], ['active', 'Account active', 'check']]
     : [['fullName', 'Full name', 'text', { required: true }], ['username', 'Username', 'text', { required: true }], ['email', 'Email', 'email', { required: true }],
-      ['role', 'Role', 'select', { choices: ['nurse', 'admin'] }], ['password', 'Temporary password (they change it at first sign-in)', 'text', { required: true, wide: true }]];
+      ['role', 'Role', 'select', { choices: ROLE_CHOICES }], ['password', 'Temporary password (they change it at first sign-in)', 'text', { required: true, wide: true }]];
   const form = formGrid(fields, u || { role: 'nurse' });
   const tmp = h('input', { type: 'text', placeholder: 'new temporary password', style: 'max-width:260px' });
   const dlg = modal(u ? `Edit ${u.fullName}` : 'Add user', [err, form,
@@ -1874,6 +2181,11 @@ function userForm(u, reload) {
       h('div', { class: 'row' }, tmp, h('button', { class: 'btn', onclick: async () => {
         try { await post(`/api/users/${u.id}/password`, { password: tmp.value }); tmp.value = ''; toast(`Temporary password set for ${u.username}`); } catch (e) { showErr(err, e.message); }
       } }, 'Set'))) : null,
+    u && u.totpOn ? section('Two-step sign-in', h('p', { class: 'muted small' }, 'Lost their phone? Reset it so they sign in with the password alone and set it up again.'),
+      h('button', { class: 'btn', onclick: async () => {
+        if (!(await confirmBox('Reset two-step sign-in?', `${u.fullName} will be signed out and can sign in with just the password until they set it up again.`, 'Reset'))) return;
+        try { await post(`/api/users/${u.id}/totp/reset`); toast(`Two-step sign-in reset for ${u.username}`); dlg.close(); reload(); } catch (e) { showErr(err, e.message); }
+      } }, 'Reset two-step sign-in')) : null,
   ], [
     ['Cancel', () => dlg.close()],
     ['Save', async () => {
@@ -1908,7 +2220,44 @@ function setSchool(body, d, reload) {
         renderShell();
       } catch (e) { showErr(err, e.message); }
     } }, 'Save')),
-    h('p', { class: 'muted small' }, `Student records are stored on this PC in ${d.settings.dataDir}. Turn on BitLocker for this drive so the records are encrypted if the PC is lost or stolen.`)));
+    h('p', { class: 'muted small' }, `Student records are stored on this PC in ${d.settings.dataDir}.`)),
+  requireTwoStep(d), encryptionSection(d, reload));
+}
+
+function requireTwoStep(d) {
+  const err = errBox();
+  const box = h('input', { type: 'checkbox', checked: d.settings.require2fa });
+  box.addEventListener('change', async () => {
+    try {
+      await post('/api/settings', { require2fa: box.checked });
+      S.require2fa = box.checked;
+      toast(box.checked ? 'Two-step sign-in is required for everyone' : 'Two-step sign-in is optional');
+    } catch (e) { box.checked = !box.checked; showErr(err, e.message); }
+  });
+  return section('Two-step sign-in', err,
+    h('label', { class: 'check' }, box, 'Require everyone to use a code from their phone as well as the password'),
+    h('p', { class: 'muted small' }, 'Turn it on for your own account first (My account). People who have not set it up are asked to the next time they open the app. If someone loses their phone, reset it for them in Users.'));
+}
+
+function encryptionSection(d, reload) {
+  const err = errBox();
+  const pw = h('input', { type: 'password', autocomplete: 'current-password', style: 'max-width:260px', placeholder: 'your password' });
+  const on = d.settings.encrypted;
+  return section('Encryption',
+    on ? h('div', { class: 'alert ok' }, 'Student records and the daily backups on this PC are encrypted. They open only for this Windows account, or anywhere with the records recovery key.')
+      : h('div', { class: 'alert warn' }, 'Student records on this PC are not encrypted yet. Anyone who copies the records file can read it.'),
+    h('p', { class: 'muted small' }, on
+      ? 'Lost the records recovery key? Make a new one. Backups made before then still open with the old key.'
+      : 'Encrypting takes a moment and shows a records recovery key once. Keep it safe: it is the only way to open a backup on another computer.'),
+    S.remote ? h('p', { class: 'muted small' }, 'Do this at the office PC.') : [err, h('div', { class: 'row' }, pw, h('button', { class: on ? 'btn' : 'btn primary', onclick: async () => {
+      try {
+        const r = await post('/api/records/encrypt', { password: pw.value });
+        pw.value = '';
+        S.encrypted = true;
+        showRecordsKey(r.key, reload);
+      } catch (e) { showErr(err, e.message); }
+    } }, on ? 'Make a new recovery key' : 'Encrypt records'))],
+    h('p', { class: 'muted small' }, 'BitLocker on the PC’s drive adds a second layer for everything else on it.'));
 }
 
 function setEmail(body, d, reload) {
@@ -2237,9 +2586,48 @@ function setSaving(body, d, reload) {
         } }, 'Save'))),
     section('Export all records', h('p', { class: 'muted' }, 'One Excel workbook with every student, medication, dose and visit.'), exportMenu('all')),
     section('Backup', h('p', { class: 'muted' }, `A copy is kept automatically each day (last 30 days) in ${d.settings.dataDir}\\backups. Keep one somewhere else too, such as the school network or a USB drive.`),
+      d.settings.encrypted ? h('p', { class: 'muted small' }, 'Backups are encrypted. On another computer they open with the records recovery key.') : null,
       h('div', { class: 'row' },
         S.remote ? null : h('button', { class: 'btn', onclick: () => backup('saveas') }, 'Save backup as\u2026'),
-        h('button', { class: 'btn', onclick: () => backup('folder') }, 'Save backup to folder'))));
+        h('button', { class: 'btn', onclick: () => backup('folder') }, 'Save backup to folder'))),
+    retentionSection(d), S.remote ? null : eraseSection());
+}
+
+// Archived students are deleted for good after the chosen number of years.
+function retentionSection(d) {
+  const keep = h('select', { 'aria-label': 'Delete archived students after', style: 'width:auto' },
+    [[0, 'Never (delete by hand)'], [1, '1 year'], [2, '2 years'], [3, '3 years'], [5, '5 years'], [7, '7 years']].map(([n, l]) => h('option', { value: n }, l)));
+  keep.value = String(d.settings.purgeYears || 0);
+  keep.addEventListener('change', async () => {
+    const n = Number(keep.value);
+    if (n && !(await confirmBox('Delete archived students automatically?', `Students archived more than ${keep.selectedOptions[0].textContent} ago are deleted for good within the hour, with all their medications, doses, visits and immunizations, and from then on every day. Check your district\u2019s records retention schedule first.`, 'Turn on', true))) { keep.value = String(d.settings.purgeYears || 0); return; }
+    try { await post('/api/settings', { purgeYears: n }); d.settings.purgeYears = n; toast('Saved'); } catch (e) { toast(e.message, true); }
+  });
+  return section('Keeping records of students who left',
+    h('p', { class: 'muted' }, 'Archive a student when they leave. Archived students are kept until you delete them (More > Delete for good on their page), or automatically after:'),
+    h('div', { class: 'row' }, keep),
+    h('p', { class: 'muted small' }, 'Your district or state sets how long school health records must be kept; ask your records officer. The audit log keeps who deleted what and when.'));
+}
+
+// End of a contract or handing the PC on: erase everything and start again.
+function eraseSection() {
+  const err = errBox();
+  const pw = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'your password' });
+  const word = h('input', { type: 'text', autocomplete: 'off', placeholder: 'ERASE' });
+  return section('Erase everything',
+    h('p', { class: 'muted' }, 'Deletes every student record, backup on this PC, user account and setting, and starts again at first-time setup. Use it when the school stops using Nurse\u2019s Log or the PC is handed on. Export all records first if the school needs a copy; copies saved elsewhere are not touched.'),
+    err, h('div', { class: 'grid' }, field('Your password', pw), field('Type ERASE', word)),
+    h('div', { class: 'row', style: 'margin-top:10px' }, h('button', { class: 'btn danger', onclick: async () => {
+      if (!(await confirmBox('Erase everything?', 'All records on this PC are deleted for good. This cannot be undone.', 'Erase everything', true))) return;
+      try {
+        await post('/api/erase', { password: pw.value, confirm: word.value });
+        S.user = null;
+        await loadState();
+        history.replaceState(null, '', '#/today');
+        render();
+        toast('Everything was erased');
+      } catch (e) { showErr(err, e.message); }
+    } }, 'Erase everything')));
 }
 
 async function backup(target) {
