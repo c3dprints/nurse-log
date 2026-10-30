@@ -71,7 +71,7 @@ public static class AppWindow {
     Marshal.ThrowExceptionForHR(SHGetPropertyStoreForWindow(h, ref iid, out s));
     try {
       Set(s, 2, relaunch);   // RelaunchCommand
-      Set(s, 3, icon);       // RelaunchIconResource
+      Set(s, 3, icon + ",0"); // RelaunchIconResource (path,index)
       Set(s, 4, name);       // RelaunchDisplayNameResource
       Set(s, 5, id);         // ID, last so the taskbar sees the rest with it
       s.Commit();

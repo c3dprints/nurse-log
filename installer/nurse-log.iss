@@ -41,8 +41,11 @@ Type: filesandordirs; Name: "{app}\app"
 Source: "..\build\stage\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{userprograms}\Nurse's Log"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\public\icon.ico"; Comment: "Nurse's Log, school nurse office records"
-Name: "{userdesktop}\Nurse's Log"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\public\icon.ico"; Comment: "Nurse's Log, school nurse office records"; Tasks: desktopicon
+; AppUserModelID matches the one scripts\window-icon.ps1 gives the app window, so the
+; taskbar ties the window to this shortcut: pinning it keeps this icon and launcher
+; instead of the browser's.
+Name: "{userprograms}\Nurse's Log"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\public\icon.ico"; Comment: "Nurse's Log, school nurse office records"; AppUserModelID: "c3dprints.NursesLog"
+Name: "{userdesktop}\Nurse's Log"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; WorkingDir: "{app}\app"; IconFilename: "{app}\app\public\icon.ico"; Comment: "Nurse's Log, school nurse office records"; Tasks: desktopicon; AppUserModelID: "c3dprints.NursesLog"
 
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\app\scripts\launch.vbs"""; Description: "Open Nurse's Log"; Flags: postinstall nowait skipifsilent

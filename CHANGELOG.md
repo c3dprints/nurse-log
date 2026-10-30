@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.16
+
+- Pinning to the taskbar keeps the Nurse's Log icon: the Start menu and Desktop shortcuts now carry the same app ID as the window, so Windows pins Nurse's Log itself instead of Chrome or Edge. If you pinned it before, unpin that button and pin it again after this update.
+
 ## 1.0.15
 
 - Nurse's Log has its own email: password reset codes and Settings > Feedback now work with nothing to set up. They are sent by the Nurse's Log mail service (a Supabase function sending through Resend, the same setup MakerQ uses), so no email password is inside the app. Feedback goes to hi@c3dprints.com with the nurse as reply-to.
