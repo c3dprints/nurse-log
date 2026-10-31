@@ -2,6 +2,7 @@
 
 ## 1.0.19
 
+- Pinning to the taskbar now really pins Nurse's Log instead of Google Chrome. The script that gives the window its own taskbar identity never found the window (Windows PowerShell misread the apostrophe in "Nurse's Log"), so the window stayed Chrome's. If you pinned it before and see the Chrome icon, unpin that button and pin it again after this update.
 - Encryption: the records file and every daily backup are now encrypted (AES-256-GCM). The key is protected by Windows for the account that runs Nurse's Log, so nothing changes day to day. New installs are encrypted from the start; existing ones turn it on in Settings > School & security. **Write down the records recovery key it shows once**: it is the only way to open the records or a backup on another PC.
 - If the key is missing (for example a copied backup on a new PC), Nurse's Log opens a locked screen that asks for the records recovery key at the office PC.
 - Roles: besides admin and nurse there are now **aide** (records doses and visits, uses dictation, cannot change student info or medications or export) and **viewer** (read only). The server enforces them, and buttons a role cannot use are hidden.

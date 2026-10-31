@@ -43,7 +43,8 @@ public static class AppWindow {
 
   static readonly Guid AUM = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
 
-  // Top-level browser windows whose title ends in "Nurse's Log".
+  // Top-level browser windows whose title ends in "Nurse's Log" (curly apostrophe).
+  // Keep this file ASCII: Windows PowerShell 5.1 reads a .ps1 without a BOM as ANSI.
   public static List<IntPtr> Find() {
     var found = new List<IntPtr>();
     EnumWindows((h, l) => {
@@ -53,7 +54,7 @@ public static class AppWindow {
       if (cls.ToString() != "Chrome_WidgetWin_1") return true;
       var t = new StringBuilder(300);
       GetWindowText(h, t, 300);
-      if (t.ToString().EndsWith("Nurse’s Log")) found.Add(h);
+      if (t.ToString().EndsWith("Nurse\u2019s Log")) found.Add(h);
       return true;
     }, IntPtr.Zero);
     return found;

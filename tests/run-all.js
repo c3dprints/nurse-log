@@ -1088,6 +1088,13 @@ async function httpTests() {
       cookie = saved;
     });
 
+    await test('Windows scripts are plain ASCII (PowerShell 5.1 and wscript read them as ANSI)', async () => {
+      for (const f of fs.readdirSync(path.join(ROOT, 'scripts')).filter((n) => /\.(ps1|vbs)$/.test(n))) {
+        const bad = fs.readFileSync(path.join(ROOT, 'scripts', f)).findIndex((b) => b > 127);
+        assert.strictEqual(bad, -1, `${f} has a non-ASCII byte at ${bad}`);
+      }
+    });
+
     await test('http: static files', async () => {
       const r = await req('GET', '/', null, { raw: true });
       assert.match(r.buf.toString(), /<title>Nurse’s Log<\/title>/);
